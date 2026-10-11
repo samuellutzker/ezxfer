@@ -502,11 +502,13 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         writer = await handle.createWritable();
       } catch (e) {
         if (e && e.name === 'AbortError') { if (t.state === 'saving') { t.state = 'offered'; renderIn(t); } return; }
-        writer = null; // picker unsupported here: fall back to an in-browser download
+        writer = null; // picker unsupported here: try the other ways below
       }
     }
+    if (!writer && t.state === 'saving') writer = await streamWriter(t).catch(() => null);
     if (t.state !== 'saving') { if (writer) writer.abort().catch(() => {}); return; }
     t.writer = writer;
+    t.via = writer ? (writer.via || 'picker') : 'memory';
     t.chunks = writer ? null : [];
     t.state = 'receiving'; t.started = performance.now();
     // if the connection dropped while the save dialog was open, accepting is
@@ -514,6 +516,83 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     t.paused = !peerConnected;
     send({ type: 'accept', id: t.id, offset: 0 });
     renderIn(t);
+  }
+
+  // ---------- streaming downloads (service worker) ----------
+  // Without a save dialog, received files are streamed into the browser's
+  // download manager through sw.js instead of being collected in memory.
+  // Service workers need a secure context (HTTPS or localhost). iOS is left out
+  // on purpose: its WebKit does not reliably turn such a stream into a download,
+  // and a transfer that "completes" without a file would be worse than the
+  // in-memory fallback.
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  const swReady = window.isSecureContext && 'serviceWorker' in navigator && !isIOS
+    ? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).catch(() => null)
+    : Promise.resolve(null);
+  let streamsOpen = 0;
+  // Browsers stop idle service workers; messages keep it alive while a download
+  // is open, including while a transfer is paused waiting for a reconnect.
+  setInterval(() => { if (streamsOpen) swReady.then((r) => r && r.active && r.active.postMessage({ type: 'ping' })); }, 10000);
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+
+  // Returns a writer like FileSystemWritableFileStream's (write/close/abort), or
+  // null if streaming isn't possible here, in which case the caller falls back.
+  async function streamWriter(t) {
+    const reg = await withTimeout(swReady, 4000).catch(() => null);
+    if (!reg || !reg.active) return null;
+    const { port1: port, port2 } = new MessageChannel();
+    const acks = new Map();
+    let seq = 0, dead = false, open = false;
+    let registered, started, closed;
+    const isRegistered = new Promise((r) => { registered = r; });
+    const isStarted = new Promise((r) => { started = r; });
+    const isClosed = new Promise((r) => { closed = r; });
+    port.onmessage = ({ data }) => {
+      if (data.type === 'registered') registered();
+      else if (data.type === 'started') started();
+      else if (data.type === 'closed') closed();
+      else if (data.type === 'ack') { const a = acks.get(data.seq); acks.delete(data.seq); if (a) a.resolve(); }
+      else if (data.type === 'cancelled') {  // the user cancelled it in the browser's download list
+        dead = true;
+        for (const a of acks.values()) a.reject(new Error('cancelled'));
+        acks.clear();
+        fail(t, 'Download cancelled');
+      }
+    };
+    const rnd = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+    const url = '/dl/' + rnd + '/' + encodeURIComponent(t.name);
+    reg.active.postMessage({ type: 'register', path: url, name: t.name, size: t.size, mime: t.mime }, [port2]);
+    const frame = el('iframe');
+    frame.hidden = true;
+    const done = (removeAfter) => {
+      if (open) { open = false; streamsOpen--; }
+      setTimeout(() => frame.remove(), removeAfter);  // give the download time to finish reading
+    };
+    try {
+      await withTimeout(isRegistered, 3000);
+      frame.src = url;
+      document.body.appendChild(frame);
+      await withTimeout(isStarted, 5000);  // the browser asked the worker for the download
+    } catch (_) {
+      port.postMessage({ type: 'abort' });
+      frame.remove();
+      return null;
+    }
+    open = true; streamsOpen++;
+    return {
+      via: 'stream',
+      write(data) {
+        if (dead) return Promise.reject(new Error('cancelled'));
+        const buf = data.slice().buffer;  // own copy, transferred to the worker
+        const n = ++seq;
+        return new Promise((resolve, reject) => {
+          acks.set(n, { resolve, reject });
+          port.postMessage({ type: 'chunk', seq: n, buf }, [buf]);
+        });
+      },
+      async close() { port.postMessage({ type: 'close' }); await withTimeout(isClosed, 10000).catch(() => {}); done(60000); },
+      async abort() { dead = true; port.postMessage({ type: 'abort' }); done(1000); },
+    };
   }
 
   function declineIncoming(t) {
@@ -767,7 +846,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; },
     get resumes() { return resumes; },
     transfers: () => [...outgoing.values(), ...incoming.values()].map((t) => ({
-      name: t.name, dir: t.file ? 'out' : 'in', state: t.state, paused: !!t.paused, bytes: t.file ? t.acked : t.received })),
+      name: t.name, dir: t.file ? 'out' : 'in', state: t.state, paused: !!t.paused, via: t.via, bytes: t.file ? t.acked : t.received })),
     // Simulates losing the network: `abandon` drops the socket without closing it, like a
     // phone going out of range, so the server only learns about it when the device returns.
     dropConnection(abandon) {

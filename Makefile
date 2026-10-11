@@ -27,7 +27,10 @@ $(BUILD)/embed: tools/embed.c | $(BUILD)
 $(BUILD)/index_html.h: web/index.html $(BUILD)/embed
 	$(BUILD)/embed $< index_html > $@
 
-ezxfer: $(SRCS) src/*.h $(BUILD)/index_html.h $(BUILD)/tls-$(TLS)
+$(BUILD)/sw_js.h: web/sw.js $(BUILD)/embed
+	$(BUILD)/embed $< sw_js > $@
+
+ezxfer: $(SRCS) src/*.h $(BUILD)/index_html.h $(BUILD)/sw_js.h $(BUILD)/tls-$(TLS)
 	$(CC) $(CFLAGS) $(TLS_CFLAGS) -I$(BUILD) -o $@ $(SRCS) $(LDFLAGS) $(TLS_LIBS)
 
 # rebuild when switching between TLS=0 and TLS=1

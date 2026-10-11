@@ -72,6 +72,8 @@ HTTPS also gives desktop Chrome/Edge on other machines the native **Save as** di
   ```
   Some browsers, notably Safari, may refuse the WebSocket connection to an untrusted certificate even after you accept the page warning. If the page loads but never says "Waiting for device", use a trusted certificate instead (mkcert).
 
+  Chrome also refuses service workers on a site whose certificate it doesn't trust, so with a clicked-through self-signed certificate, downloads on Android fall back to collecting the file in memory. Large downloads to an Android phone need a trusted certificate (mkcert).
+
 ## How it works
 
 1. Opening the page connects a WebSocket to `/ws`. The server creates a **session** with a random 6-character code and replies with a join URL like `http://192.168.1.20:8080/?s=K7PQ2M`. The page shows that URL as a QR code (`/qr.svg?d=…`).
@@ -79,7 +81,8 @@ HTTPS also gives desktop Chrome/Edge on other machines the native **Save as** di
 3. Picking files sends an *offer* (name, size, type) to the peer, where it shows up with **Accept / Decline**. When the receiver accepts and picks where to save, the sender starts streaming. The data goes as 256 KB binary WebSocket messages, and the server relays each one to the other device unchanged.
 4. Where to save:
    - Browsers with the File System Access API (desktop Chrome/Edge over `localhost` or HTTPS) show a native **Save as** dialog and write straight to disk.
-   - Other browsers (phones, plain-HTTP LAN pages) collect the file in memory and hand it to the browser's normal download.
+   - Otherwise, on HTTPS (or `localhost`), Android and desktop Firefox stream the file into the browser's normal download through a small service worker (`/sw.js`), so it never sits in memory. The worker answers a hidden `/dl/…` request with a streaming response that the page feeds chunk by chunk. Backpressure from the download reaches all the way back to the sender.
+   - Everywhere else (plain-HTTP LAN pages, and iOS, whose WebKit doesn't reliably download such streams), the file is collected in memory and then handed to the browser's normal download.
 
 Files are relayed, never stored. Flow control works end to end:
 - The sender limits its WebSocket buffer and the amount of data the receiver hasn't acknowledged yet.
@@ -102,7 +105,7 @@ The join URL uses the address the page was opened with. If that was `localhost`,
 - By default traffic is plain HTTP; use `--cert`/`--key` to encrypt it (see above). Behind a TLS reverse proxy such as Caddy or nginx, run ezxfer without a certificate and pass `--url https://…`.
 - Anyone who knows a session's code can join it while it has a free slot. Codes are random (32⁶ ≈ 10⁹ combinations), and a session is full once two devices are connected.
 - While a transfer is running, the page keeps the screen on with the Screen Wake Lock API, because phones drop network connections when the screen locks. Browsers only offer this on HTTPS (or `localhost`); elsewhere, phones show a hint to keep the screen on.
-- Without the File System Access API, the receiving browser holds the whole file in memory until the transfer completes. That is fine for photos and videos, but very large files (several GB) on a phone may hit browser limits.
+- Only the in-memory route (plain HTTP, or iOS) holds the whole file in memory until the transfer completes. That is fine for photos and videos, but very large files (several GB) on a phone may hit browser limits. To receive big files on an Android phone, run with `--cert`/`--key` so downloads are streamed.
 
 ## Layout
 
@@ -112,8 +115,9 @@ src/server.c    poll() event loop, HTTP routes, sessions, WebSocket relay
 src/proto.c     HTTP request parser, query decoding, WebSocket framing
 src/tls.c       optional OpenSSL wrapper (stubs when built with TLS=0)
 src/sha1.c      SHA-1 + Base64 (WebSocket handshake)
+web/sw.js       service worker that streams received files into downloads
 src/qr.c        QR code encoder + SVG output
-web/index.html  the frontend (embedded via tools/embed.c into build/index_html.h)
+web/index.html  the frontend (embedded via tools/embed.c, like sw.js)
 tests/          unit, QR reference, integration and browser tests
 ```
 

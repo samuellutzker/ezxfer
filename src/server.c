@@ -4,6 +4,7 @@
 #include "qr.h"
 #include "tls.h"
 #include "index_html.h"
+#include "sw_js.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -590,6 +591,8 @@ static void handle_http(conn *c)
         serve_index(c);
     else if (strcmp(req.path, "/qr.svg") == 0)
         serve_qr(c, &req);
+    else if (strcmp(req.path, "/sw.js") == 0)
+        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", sw_js, sw_js_len, NULL);
     else if (strcmp(req.path, "/ws") == 0 && is_get)
         ws_upgrade(c, &req);
     else if (strcmp(req.path, "/health") == 0)

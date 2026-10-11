@@ -28,13 +28,18 @@ const TLS = process.argv.includes('--tls');
 const SCHEME = TLS ? 'https' : 'http';
 const OUT = process.env.E2E_OUT || fs.mkdtempSync(path.join(os.tmpdir(), 'ezxfer-e2e-'));
 const certArgs = [];
+let spki = '';
 if (TLS) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ezxfer-e2e-cert-'));
   execSync(`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj /CN=ezxfer-e2e ` +
     `-keyout ${dir}/key.pem -out ${dir}/cert.pem`, { stdio: 'ignore' });
   certArgs.push('--cert', `${dir}/cert.pem`, '--key', `${dir}/key.pem`);
+  // Make the browser trust this certificate, as a real setup would (e.g. mkcert):
+  // Chrome only allows service workers on sites with a trusted certificate.
+  spki = execSync(`openssl x509 -in ${dir}/cert.pem -pubkey -noout | openssl pkey -pubin -outform der | ` +
+    'openssl dgst -sha256 -binary | openssl base64').toString().trim();
 }
-console.log(`mode: ${TLS ? 'HTTPS/WSS (self-signed certificate)' : 'plain HTTP/WS'}`);
+console.log(`mode: ${TLS ? 'HTTPS/WSS (self-signed certificate, trusted by the test browser)' : 'plain HTTP/WS'}`);
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 let passed = 0;
 function ok(name, extra = '') { passed++; console.log(`  ok  ${name}${extra ? '  ' + extra : ''}`); }
@@ -46,7 +51,8 @@ await new Promise((r) => setTimeout(r, 300));
 
 // Talk to the server directly even if an HTTP(S)_PROXY is configured.
 const browserEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/_proxy$/i.test(k)));
-const browser = await chromium.launch({ args: ['--no-proxy-server'], env: browserEnv });
+const browser = await chromium.launch({
+  args: ['--no-proxy-server', ...(spki ? [`--ignore-certificate-errors-spki-list=${spki}`] : [])], env: browserEnv });
 const errors = [];
 function watch(page, label) {
   page.on('pageerror', (e) => errors.push(`${label}: ${e.message}`));
@@ -251,6 +257,7 @@ try {
   const bigSha = sha(fs.readFileSync(bigPath));
   await A.setInputFiles('#fileInput', bigPath);
   const dlBig = B.waitForEvent('download', { timeout: 120000 });
+  dlBig.catch(() => {});
   await row(B, 'inList', 'movie.mov').getByRole('button', { name: 'Accept' }).click();
   await B.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'movie.mov') || {}).bytes > 20e6);
   await B.evaluate(() => window.ezxfer.dropConnection(true));  // vanishes without closing the socket
@@ -291,6 +298,37 @@ try {
   ok('phone disconnect detected; same QR reconnects');
   await B2.close();
   await A.waitForFunction(() => !document.body.classList.contains('connected'));
+
+  // ---------- Android phone: download streamed to disk via the service worker ----------
+  // (the page is a secure context on 127.0.0.1 even over plain HTTP)
+  const droidCtx = await browser.newContext({ ...devices['Pixel 7'], acceptDownloads: true, ignoreHTTPSErrors: true });
+  await droidCtx.addInitScript(() => { delete window.showSaveFilePicker; });  // as on Android Chrome
+  const P = await droidCtx.newPage(); watch(P, 'android');
+  await P.goto(`${SCHEME}://127.0.0.1:${port}/?s=${session}`);
+  await P.waitForFunction(() => document.body.classList.contains('connected'));
+  await A.waitForFunction(() => document.getElementById('peerName').textContent === 'Android phone');
+  const apkPath = path.join(OUT, 'app-release.apk');
+  fs.writeFileSync(apkPath, randomBytes(40 * 1024 * 1024));
+  const apkSha = sha(fs.readFileSync(apkPath));
+  await A.setInputFiles('#fileInput', apkPath);
+  const dlApk = P.waitForEvent('download', { timeout: 120000 });
+  dlApk.catch(() => {});  // awaited below; don't crash the run if a step before fails
+  await row(P, 'inList', 'app-release.apk').getByRole('button', { name: 'Accept' }).click();
+  const apkInfo = () => P.evaluate(() => window.ezxfer.transfers().find((t) => t.name === 'app-release.apk') || {});
+  await P.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'app-release.apk') || {}).bytes > 10e6);
+  assert((await apkInfo()).via === 'stream', 'android uses the streamed download: ' + (await apkInfo()).via);
+  await P.evaluate(() => window.ezxfer.dropConnection(true));  // and survives a reconnect while streaming
+  const apkDl = await dlApk;
+  assert(apkDl.suggestedFilename() === 'app-release.apk', 'streamed filename ' + apkDl.suggestedFilename());
+  const gotApk = fs.readFileSync(await apkDl.path());
+  assert(gotApk.length === 40 * 1024 * 1024 && sha(gotApk) === apkSha, 'streamed download identical');
+  await row(A, 'outList', 'app-release.apk').locator('.st-done').waitFor();
+  const heap = await P.evaluate(() => performance.memory ? performance.memory.usedJSHeapSize : 0);
+  fs.unlinkSync(apkPath);
+  await droidCtx.close();
+  await A.waitForFunction(() => !document.body.classList.contains('connected'));
+  ok('android streams a 40 MB download to disk through the service worker, across a reconnect',
+     heap ? `page JS heap ${(heap / 1e6).toFixed(0)} MB` : '');
 
   // ---------- another computer joins by typing the code ----------
   const other = await browser.newContext({ viewport: { width: 1000, height: 800 }, ignoreHTTPSErrors: true });
