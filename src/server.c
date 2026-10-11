@@ -65,7 +65,6 @@ typedef struct conn {
     int frag_op;
     struct session *sess;
     time_t last_rx, last_ping, created;
-    char host[256];
     char addr[64];
     char cid[65]; /* client id chosen by the page; lets a device reclaim its slot */
 } conn;
@@ -161,7 +160,8 @@ static void random_bytes(uint8_t *p, size_t n)
     }
 }
 
-void lan_address(char *out, unsigned outsz)
+/* Best-effort LAN IPv4 address of this machine (falls back to 127.0.0.1). */
+static void lan_address(char *out, size_t outsz)
 {
     snprintf(out, outsz, "127.0.0.1");
     struct ifaddrs *ifa = NULL;
@@ -184,7 +184,7 @@ void lan_address(char *out, unsigned outsz)
             score = 2; /* 172.16/12 */
         if (score > best) {
             best = score;
-            inet_ntop(AF_INET, &((struct sockaddr_in *)i->ifa_addr)->sin_addr, out, outsz);
+            inet_ntop(AF_INET, &((struct sockaddr_in *)i->ifa_addr)->sin_addr, out, (socklen_t)outsz);
         }
     }
     freeifaddrs(ifa);
@@ -194,6 +194,13 @@ static int is_local_host(const char *h)
 {
     return !*h || strcmp(h, "localhost") == 0 || strncmp(h, "127.", 4) == 0 ||
            strcmp(h, "[::1]") == 0 || strcmp(h, "0.0.0.0") == 0;
+}
+
+/* Host headers end up in JSON, a URL and a QR code: accept only name/IP chars. */
+static int plausible_host(const char *h)
+{
+    return *h && strspn(h, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]") ==
+                     strlen(h);
 }
 
 /* Origin (scheme://host:port) that other devices should use to reach us. */
@@ -206,8 +213,9 @@ static void public_origin(const char *host_header, char *out, size_t outsz)
             out[--l] = '\0';
         return;
     }
-    char host[256];
-    snprintf(host, sizeof host, "%s", host_header);
+    char host[256] = "";
+    if (plausible_host(host_header))
+        snprintf(host, sizeof host, "%s", host_header);
     /* strip port, keeping IPv6 brackets */
     char *colon = host[0] == '[' ? strstr(host, "]:") : strrchr(host, ':');
     if (colon)
@@ -221,7 +229,7 @@ static void public_origin(const char *host_header, char *out, size_t outsz)
             lan_address(ip, sizeof ip);
         snprintf(out, outsz, "%s://%s:%d", g_tls ? "https" : "http", ip, g_cfg->port);
     } else {
-        snprintf(out, outsz, "%s://%s", g_tls ? "https" : "http", host_header);
+        snprintf(out, outsz, "%s://%s", g_tls ? "https" : "http", host_header); /* keeps the port */
     }
 }
 
@@ -400,36 +408,34 @@ static void compute_build_id(void)
     snprintf(g_build, sizeof g_build, "%016llx", (unsigned long long)h);
 }
 
-static void serve_index(conn *c)
+static buffer g_page; /* the page with {{VERSION}} and {{BUILD}} filled in */
+
+static void render_page(void)
 {
     const char *src = g_template ? g_template : (const char *)index_html;
     size_t len = g_template ? g_template_len : index_html_len;
-    /* Template substitution: {{VERSION}} and {{BUILD}} */
     static const struct { const char *ph; const char *val; } subst[] = {
         {"{{VERSION}}", EZX_VERSION}, {"{{BUILD}}", g_build}};
-    buffer b = {0};
-    size_t i = 0;
-    while (i < len) {
-        size_t next = len, which = 0;
-        for (size_t k = 0; k < sizeof subst / sizeof subst[0]; k++) {
-            const char *hit = memmem(src + i, len - i, subst[k].ph, strlen(subst[k].ph));
-            if (hit && (size_t)(hit - src) < next) {
-                next = (size_t)(hit - src);
-                which = k;
-            }
-        }
-        buf_append(&b, src + i, next - i);
-        i = next;
-        if (next < len) {
-            buf_append(&b, subst[which].val, strlen(subst[which].val));
-            i += strlen(subst[which].ph);
+    for (size_t i = 0; i < len;) {
+        size_t k;
+        for (k = 0; k < sizeof subst / sizeof subst[0]; k++)
+            if (strncmp(src + i, subst[k].ph, strlen(subst[k].ph)) == 0)
+                break;
+        if (k < sizeof subst / sizeof subst[0]) {
+            buf_append(&g_page, subst[k].val, strlen(subst[k].val));
+            i += strlen(subst[k].ph);
+        } else {
+            buf_append(&g_page, src + i++, 1);
         }
     }
-    http_respond(c, 200, "OK", "text/html; charset=utf-8", b.d, b.len,
+}
+
+static void serve_index(conn *c)
+{
+    http_respond(c, 200, "OK", "text/html; charset=utf-8", g_page.d, g_page.len,
                  "Content-Security-Policy: default-src 'self'; img-src 'self' data: blob:; "
                  "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
                  "connect-src 'self' ws: wss:\r\n");
-    buf_free(&b);
 }
 
 static void serve_qr(conn *c, const http_request *req)
@@ -485,6 +491,16 @@ static void normalize_code(char *s)
             *s = (char)(*s - 'a' + 'A');
 }
 
+/* Tells the page why it can't join (it shows `message`) and closes. */
+static void ws_refuse(conn *c, const char *code, const char *message, unsigned close_code)
+{
+    char msg[256];
+    snprintf(msg, sizeof msg, "{\"type\":\"error\",\"code\":\"%s\",\"message\":\"%s\"}", code,
+             message);
+    ws_send_text(c, msg);
+    ws_close(c, close_code, code);
+}
+
 static void ws_upgrade(conn *c, const http_request *req)
 {
     if (!req->upgrade_ws || !req->connection_up || !req->ws_key[0]) {
@@ -508,7 +524,6 @@ static void ws_upgrade(conn *c, const http_request *req)
     buf_append(&c->out, resp, (size_t)rl);
     c->is_ws = 1;
     c->last_rx = c->last_ping = time(NULL);
-    snprintf(c->host, sizeof c->host, "%s", req->host);
 
     char code[32] = "";
     query_param(req->query, "s", code, sizeof code);
@@ -522,9 +537,7 @@ static void ws_upgrade(conn *c, const http_request *req)
     if (code[0]) {
         s = session_find(code);
         if (!s) {
-            ws_send_text(c, "{\"type\":\"error\",\"code\":\"not_found\","
-                            "\"message\":\"Session not found or expired\"}");
-            ws_close(c, 4004, "not found");
+            ws_refuse(c, "not_found", "Session not found or expired", 4004);
             return;
         }
         /* The same device reconnecting replaces its old connection, which may
@@ -541,17 +554,13 @@ static void ws_upgrade(conn *c, const http_request *req)
         if (slot < 0)
             slot = !s->peer[0] ? 0 : !s->peer[1] ? 1 : -1;
         if (slot < 0) {
-            ws_send_text(c, "{\"type\":\"error\",\"code\":\"full\","
-                            "\"message\":\"This session already has two devices\"}");
-            ws_close(c, 4009, "full");
+            ws_refuse(c, "full", "This session already has two devices", 4009);
             return;
         }
     } else {
         s = session_create();
         if (!s) {
-            ws_send_text(c, "{\"type\":\"error\",\"code\":\"busy\","
-                            "\"message\":\"Server is busy, try again later\"}");
-            ws_close(c, 1013, "busy");
+            ws_refuse(c, "busy", "Server is busy, try again later", 1013);
             return;
         }
         slot = 0;
@@ -812,6 +821,12 @@ static int conn_flush(conn *c)
     return c->closing ? -1 : 0;
 }
 
+static void set_nonblocking(int fd)
+{
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+}
+
 static void accept_new(int lfd)
 {
     for (;;) {
@@ -829,8 +844,7 @@ static void accept_new(int lfd)
             close(fd);
             continue;
         }
-        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-        fcntl(fd, F_SETFD, FD_CLOEXEC);
+        set_nonblocking(fd);
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         c->fd = fd;
@@ -894,8 +908,7 @@ static int open_listener(const server_config *cfg)
         perror("socket");
         return -1;
     }
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    set_nonblocking(fd);
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(fd, 64) < 0) {
@@ -905,6 +918,33 @@ static int open_listener(const server_config *cfg)
         return -1;
     }
     return fd;
+}
+
+/* Compact (default): two modules per line with half-block glyphs; some terminals
+ * (e.g. macOS Terminal) leave gaps between lines. Full: each module is two
+ * spaces with a black or white background, which fills the whole cell including
+ * the line spacing, so it renders everywhere, at twice the height. */
+static void print_terminal_qr(const qr_code *qr, int full)
+{
+    const int border = 2;
+    for (int y = -border; y < qr->size + border; y += full ? 1 : 2) {
+        printf(full ? "  " : "  \033[30;107m");
+        for (int x = -border, cur = -1; x < qr->size + border; x++) {
+            if (full) {
+                int dark = qr_module(qr, x, y);
+                if (dark != cur)
+                    fputs(dark ? "\033[40m" : "\033[107m", stdout);
+                cur = dark;
+                fputs("  ", stdout);
+            } else {
+                int top = qr_module(qr, x, y), bot = qr_module(qr, x, y + 1);
+                fputs(top && bot ? "\xe2\x96\x88" : top ? "\xe2\x96\x80" : bot ? "\xe2\x96\x84" : " ",
+                      stdout);
+            }
+        }
+        printf("\033[0m\n");
+    }
+    printf("\n");
 }
 
 static void print_banner(const server_config *cfg)
@@ -918,42 +958,8 @@ static void print_banner(const server_config *cfg)
         char url[340];
         snprintf(url, sizeof url, "%s/", origin);
         static qr_code qr;
-        if (qr_encode((const uint8_t *)url, strlen(url), QR_ECC_L, 0, -1, &qr) == 0) {
-            const int border = 2;
-            if (cfg->print_qr == 1) {
-                /* compact (default): two modules per line using half-block glyphs.
-                 * Some terminals (e.g. macOS Terminal) leave gaps between the
-                 * lines; --full-qr avoids that. */
-                for (int y = -border; y < qr.size + border; y += 2) {
-                    printf("  \033[30;107m");
-                    for (int x = -border; x < qr.size + border; x++) {
-                        int top = qr_module(&qr, x, y), bot = qr_module(&qr, x, y + 1);
-                        fputs(top && bot ? "\xe2\x96\x88" : top ? "\xe2\x96\x80"
-                                                        : bot ? "\xe2\x96\x84" : " ",
-                              stdout);
-                    }
-                    printf("\033[0m\n");
-                }
-            } else {
-                /* --full-qr: each module is two spaces with a black or white
-                 * background. Backgrounds fill the whole cell including the line
-                 * spacing, so this renders without gaps in every terminal, at
-                 * twice the height. */
-                for (int y = -border; y < qr.size + border; y++) {
-                    int cur = -1;
-                    printf("  ");
-                    for (int x = -border; x < qr.size + border; x++) {
-                        int dark = qr_module(&qr, x, y);
-                        if (dark != cur)
-                            fputs(dark ? "\033[40m" : "\033[107m", stdout);
-                        cur = dark;
-                        fputs("  ", stdout);
-                    }
-                    printf("\033[0m\n");
-                }
-            }
-            printf("\n");
-        }
+        if (qr_encode((const uint8_t *)url, strlen(url), QR_ECC_L, 0, -1, &qr) == 0)
+            print_terminal_qr(&qr, cfg->print_qr == 2);
     }
     fflush(stdout);
 }
@@ -982,6 +988,7 @@ int server_run(const server_config *cfg)
     if (cfg->web_file && load_template(cfg->web_file) < 0)
         return 1;
     compute_build_id();
+    render_page();
     if (cfg->tls_cert) {
         char err[512];
         if (tls_init(cfg->tls_cert, cfg->tls_key, err, sizeof err) < 0) {
@@ -1099,6 +1106,7 @@ int server_run(const server_config *cfg)
             session_destroy(g_sessions[i]);
     close(lfd);
     free(g_template);
+    buf_free(&g_page);
     tls_cleanup();
     if (!cfg->quiet)
         fprintf(stderr, "\nbye\n");

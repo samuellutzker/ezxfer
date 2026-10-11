@@ -306,6 +306,11 @@ def ws_hello_url(srv):
     b = WS(srv.port, host="my-pc.lan:1234")
     assert b.recv_json()["url"].startswith(SCHEME + "://my-pc.lan:1234/?s=")
     b.close()
+    # anything that isn't a plausible host name is ignored (it would end up in JSON and the QR code)
+    c = WS(srv.port, host='evil"host')
+    url = c.recv_json()["url"]  # still valid JSON
+    assert "evil" not in url and url.endswith(f":{srv.port}/?s=" + url.split("?s=")[1]), url
+    c.close()
 
 
 @test

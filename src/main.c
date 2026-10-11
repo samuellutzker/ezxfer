@@ -38,60 +38,65 @@ static void usage(const char *prog)
             prog, tls_available() ? "available" : "not compiled in (rebuild with OpenSSL)");
 }
 
+/* Matches -x / --long. Options that take a value only match when one follows. */
+static int is_opt(const char *a, const char *s, const char *l) { return !strcmp(a, s) || !strcmp(a, l); }
+
+/* Parses a whole decimal number in [min, max]; returns -1 (after a message) if invalid. */
+static int int_arg(const char *what, const char *v, long min, long max, int *out)
+{
+    char *end;
+    long n = strtol(v, &end, 10);
+    if (!*v || *end || n < min || n > max) {
+        fprintf(stderr, "invalid %s: %s\n", what, v);
+        return -1;
+    }
+    *out = (int)n;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     server_config cfg = {.bind_addr = "0.0.0.0", .port = 8080, .session_timeout = 120,
                          .print_qr = 1};
 
     for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        const char *next = i + 1 < argc ? argv[i + 1] : NULL;
-        if ((!strcmp(a, "-p") || !strcmp(a, "--port")) && next) {
-            char *end;
-            long p = strtol(next, &end, 10);
-            if (*end || p < 1 || p > 65535) {
-                fprintf(stderr, "invalid port: %s\n", next);
+        const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
+        const char **str = NULL; /* string-valued option to fill */
+        if (v && is_opt(a, "-p", "--port")) {
+            if (int_arg("port", v, 1, 65535, &cfg.port) < 0)
                 return 2;
-            }
-            cfg.port = (int)p;
             i++;
-        } else if ((!strcmp(a, "-b") || !strcmp(a, "--bind")) && next) {
-            cfg.bind_addr = next;
-            i++;
-        } else if ((!strcmp(a, "-u") || !strcmp(a, "--url")) && next) {
-            cfg.base_url = next;
-            i++;
-        } else if ((!strcmp(a, "-w") || !strcmp(a, "--web")) && next) {
-            cfg.web_file = next;
-            i++;
-        } else if ((!strcmp(a, "-c") || !strcmp(a, "--cert")) && next) {
-            cfg.tls_cert = next;
-            i++;
-        } else if ((!strcmp(a, "-k") || !strcmp(a, "--key")) && next) {
-            cfg.tls_key = next;
-            i++;
-        } else if ((!strcmp(a, "-t") || !strcmp(a, "--session-timeout")) && next) {
-            char *end;
-            long t = strtol(next, &end, 10);
-            if (*end || t < 0 || t > 86400) {
-                fprintf(stderr, "invalid session timeout: %s\n", next);
+        } else if (v && is_opt(a, "-t", "--session-timeout")) {
+            if (int_arg("session timeout", v, 0, 86400, &cfg.session_timeout) < 0)
                 return 2;
-            }
-            cfg.session_timeout = (int)t;
             i++;
+        } else if (v && is_opt(a, "-b", "--bind")) {
+            str = &cfg.bind_addr;
+        } else if (v && is_opt(a, "-u", "--url")) {
+            str = &cfg.base_url;
+        } else if (v && is_opt(a, "-w", "--web")) {
+            str = &cfg.web_file;
+        } else if (v && is_opt(a, "-c", "--cert")) {
+            str = &cfg.tls_cert;
+        } else if (v && is_opt(a, "-k", "--key")) {
+            str = &cfg.tls_key;
         } else if (!strcmp(a, "--no-qr")) {
             cfg.print_qr = 0;
         } else if (!strcmp(a, "--full-qr")) {
             cfg.print_qr = 2;
-        } else if (!strcmp(a, "-q") || !strcmp(a, "--quiet")) {
+        } else if (is_opt(a, "-q", "--quiet")) {
             cfg.quiet = 1;
-        } else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
+        } else if (is_opt(a, "-h", "--help")) {
             usage(argv[0]);
             return 0;
         } else {
             fprintf(stderr, "unknown or incomplete option: %s\n\n", a);
             usage(argv[0]);
             return 2;
+        }
+        if (str) {
+            *str = v;
+            i++;
         }
     }
     if (cfg.tls_key && !cfg.tls_cert) {

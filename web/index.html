@@ -266,6 +266,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const inKey = (id) => peerId + ':' + (id >>> 0);
   const sendQueue = [];
   let pumping = false;
+  const OUT_ACTIVE = ['offered', 'sending', 'finishing'];  // states in which a transfer can still change
+  const IN_ACTIVE = ['offered', 'saving', 'receiving'];
 
   // ---------- utils ----------
   function fmtSize(n) {
@@ -364,7 +366,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     }, timeoutMs);
   }
   function wakeUp() {  // back on the page: make sure the connection still works
-    if (intentionalClose || document.hidden) return;
+    if (document.hidden) return;
+    wakeFailed = false; updateWakeLock();  // the browser drops the wake lock while hidden
+    if (intentionalClose) return;
     if (!ws || ws.readyState > 1) { reconnectDelay = 800; connect(session); } else checkAlive(3000, true);
   }
   setInterval(() => { if (!document.hidden && performance.now() - lastRx > 15000) checkAlive(10000); }, 5000);
@@ -438,11 +442,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       case 'pong': break;
       case 'offer': addIncoming(m); break;
       case 'accept': onAccepted(m); break;
-      case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') { t.state = 'declined'; renderOut(t); } break; }
+      case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') endOut(t, 'declined'); break; }
       case 'cancel': onCancel(m); break;
-      case 'ack': { const t = outgoing.get(m.id); if (t && (t.state === 'sending' || t.state === 'finishing')) { t.acked = Math.min(t.size, Math.max(t.acked, +m.bytes || 0)); renderOut(t); } break; }
+      case 'ack': { const t = outgoing.get(m.id); if (t && (t.state === 'sending' || t.state === 'finishing')) { t.acked = Math.min(t.size, Math.max(t.acked, +m.bytes || 0)); render(t); } break; }
       case 'eof': onEof(m.id); break;
-      case 'done': { const t = outgoing.get(m.id); if (t && ['offered', 'sending', 'finishing'].includes(t.state)) { t.acked = t.size; t.state = 'done'; t.paused = false; renderOut(t); } break; }
+      case 'done': { const t = outgoing.get(m.id); if (t && OUT_ACTIVE.includes(t.state)) { t.acked = t.size; endOut(t, 'done'); } break; }
     }
   }
 
@@ -452,42 +456,41 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (on) setPill('on', 'Connected');
     else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
     if (!on) $('peerName').textContent = 'Device';
-    for (const t of outgoing.values()) if (t.state === 'offered') renderOut(t);
+    for (const t of outgoing.values()) if (t.state === 'offered') render(t);
   }
 
+  // Final states: done, declined, cancelled, failed (with t.error).
+  function endOut(t, state, error) { t.state = state; t.paused = false; t.error = error; render(t); }
+  function endIn(t, state, error) { abortWriter(t); t.state = state; t.paused = false; t.error = error; render(t); }
+
   function failActive(reason) {
-    for (const t of outgoing.values())
-      if (['offered', 'sending', 'finishing'].includes(t.state)) { t.state = 'failed'; t.paused = false; t.error = reason; renderOut(t); }
-    for (const t of incoming.values())
-      if (['offered', 'saving', 'receiving'].includes(t.state)) { abortWriter(t); t.state = 'failed'; t.paused = false; t.error = reason; renderIn(t); }
+    for (const t of outgoing.values()) if (OUT_ACTIVE.includes(t.state)) endOut(t, 'failed', reason);
+    for (const t of incoming.values()) if (IN_ACTIVE.includes(t.state)) endIn(t, 'failed', reason);
     sendQueue.length = 0;
   }
 
   // A connection dropped: running transfers wait (data, files and writers are kept).
   function pauseActive() {
     for (const t of outgoing.values())
-      if (t.state === 'sending' || t.state === 'finishing') { t.paused = true; renderOut(t); }
+      if (t.state === 'sending' || t.state === 'finishing') { t.paused = true; render(t); }
     for (const t of incoming.values())
-      if (t.state === 'receiving') { t.paused = true; renderIn(t); }
+      if (t.state === 'receiving') { t.paused = true; render(t); }
     sendQueue.length = 0;
   }
 
   // The other device's page was reloaded: it kept its place in the session but
   // lost its files and partial downloads, so transfers with it can't continue.
   function peerReloaded() {
-    for (const t of outgoing.values())
-      if (t.state === 'sending' || t.state === 'finishing') { t.state = 'failed'; t.paused = false; t.error = 'The other device reloaded the page'; renderOut(t); }
-    for (const t of incoming.values())
-      if (t.peer === peerId && ['offered', 'saving', 'receiving'].includes(t.state)) {
-        abortWriter(t); t.state = 'failed'; t.paused = false; t.error = 'The other device reloaded the page'; renderIn(t);
-      }
+    const why = 'The other device reloaded the page';
+    for (const t of outgoing.values()) if (t.state === 'sending' || t.state === 'finishing') endOut(t, 'failed', why);
+    for (const t of incoming.values()) if (t.peer === peerId && IN_ACTIVE.includes(t.state)) endIn(t, 'failed', why);
   }
 
   // The same device is back. Messages may have been lost in the gap, so each side
   // repeats what matters; duplicates are ignored. Receivers say where to continue.
   function resumeWithPeer() {
     for (const t of outgoing.values()) {
-      if (t.state === 'offered') send({ type: 'offer', id: t.id, name: t.name, size: t.size, mime: t.file.type || '' });
+      if (t.state === 'offered') sendOffer(t);
       else if (t.state === 'cancelled') send({ type: 'cancel', id: t.id, from: 'sender' });
     }
     for (const t of incoming.values()) {
@@ -497,7 +500,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         t.started = performance.now(); t.base = t.received;
         if (t.received > 0) resumes++;
         send({ type: 'accept', id: t.id, offset: t.received });
-        renderIn(t);
+        render(t);
       } else if (t.state === 'declined') send({ type: 'decline', id: t.id });
       else if (t.state === 'cancelled' || t.state === 'failed') send({ type: 'cancel', id: t.id, from: 'receiver' });
       else if (t.state === 'done') send({ type: 'done', id: t.id });
@@ -515,10 +518,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0, base: 0, gen: 0, paused: false };
       outgoing.set(t.id, t);
       createRow(t, false);
-      renderOut(t);
-      send({ type: 'offer', id: t.id, name: file.name, size: file.size, mime: file.type || '' });
+      render(t);
+      sendOffer(t);
     }
   }
+  const sendOffer = (t) => send({ type: 'offer', id: t.id, name: t.name, size: t.size, mime: t.file.type || '' });
 
   // "accept" starts a transfer, or continues it from `offset` after a reconnect.
   function onAccepted(m) {
@@ -528,13 +532,13 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       send({ type: 'cancel', id: m.id, from: 'sender' });
       return;
     }
-    if (!['offered', 'sending', 'finishing'].includes(t.state)) return;
+    if (!OUT_ACTIVE.includes(t.state)) return;
     const offset = Math.max(0, Math.min(t.size, Math.floor(+m.offset || 0)));
     t.gen++;                       // invalidates any chunk read for the old position
     t.sent = t.acked = t.base = offset;
     t.started = performance.now();
     t.state = 'sending'; t.paused = false;
-    renderOut(t);
+    render(t);
     if (!sendQueue.includes(t)) sendQueue.push(t);
     pump();
   }
@@ -552,7 +556,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           const gen = t.gen, start = t.sent, end = Math.min(start + CHUNK, t.size);
           let buf;
           try { buf = await t.file.slice(start, end).arrayBuffer(); }
-          catch (e) { t.state = 'failed'; t.error = 'Could not read file'; send({ type: 'cancel', id: t.id, from: 'sender' }); break; }
+          catch (e) { endOut(t, 'failed', 'Could not read file'); send({ type: 'cancel', id: t.id, from: 'sender' }); break; }
           if (t.gen !== gen || t.state !== 'sending' || t.paused || sock !== ws) continue;  // moved on meanwhile
           const frame = new Uint8Array(HDR + buf.byteLength);
           const dv = new DataView(frame.buffer);
@@ -562,10 +566,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           frame.set(new Uint8Array(buf), HDR);
           sock.send(frame);
           t.sent = end;
-          renderOut(t);
+          render(t);
         }
         if (t.state === 'sending' && !t.paused && t.sent >= t.size) { send({ type: 'eof', id: t.id }); t.state = 'finishing'; }
-        renderOut(t);
+        render(t);
         const qi = sendQueue.indexOf(t);
         if (qi >= 0) sendQueue.splice(qi, 1);
       }
@@ -573,10 +577,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function cancelOutgoing(t) {
-    if (!['offered', 'sending', 'finishing'].includes(t.state)) return;
-    t.state = 'cancelled';
+    if (!OUT_ACTIVE.includes(t.state)) return;
+    endOut(t, 'cancelled');
     send({ type: 'cancel', id: t.id, from: 'sender' });
-    renderOut(t);
   }
 
   // ---------- receiving ----------
@@ -587,20 +590,20 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
                 received: 0, lastAck: 0, state: 'offered', writer: null, chunks: null, chain: Promise.resolve(), started: 0, base: 0, paused: false };
     incoming.set(inKey(id), t);
     createRow(t, true);
-    renderIn(t);
+    render(t);
     if (document.hidden && 'vibrate' in navigator) try { navigator.vibrate(80); } catch (_) {}
   }
 
   async function acceptIncoming(t) {
     if (t.state !== 'offered') return;
-    t.state = 'saving'; renderIn(t);
+    t.state = 'saving'; render(t);
     let writer = null;
     if (typeof window.showSaveFilePicker === 'function') {
       try {
         const handle = await window.showSaveFilePicker({ suggestedName: t.name });
         writer = await handle.createWritable();
       } catch (e) {
-        if (e && e.name === 'AbortError') { if (t.state === 'saving') { t.state = 'offered'; renderIn(t); } return; }
+        if (e && e.name === 'AbortError') { if (t.state === 'saving') { t.state = 'offered'; render(t); } return; }
         writer = null; // picker unsupported here: try the other ways below
       }
     }
@@ -614,7 +617,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     // repeated when the other device is back (see resumeWithPeer)
     t.paused = !peerConnected;
     send({ type: 'accept', id: t.id, offset: 0 });
-    renderIn(t);
+    render(t);
   }
 
   // ---------- streaming downloads (service worker) ----------
@@ -658,8 +661,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         fail(t, 'Download cancelled');
       }
     };
-    const rnd = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
-    const url = '/dl/' + rnd + '/' + encodeURIComponent(t.name);
+    const url = '/dl/' + randomHex(8) + '/' + encodeURIComponent(t.name);
     reg.active.postMessage({ type: 'register', path: url, name: t.name, size: t.size, mime: t.mime }, [port2]);
     const frame = el('iframe');
     frame.hidden = true;
@@ -695,8 +697,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function declineIncoming(t) {
-    if (t.state === 'offered' || t.state === 'saving') { t.state = 'declined'; send({ type: 'decline', id: t.id }); renderIn(t); }
-    else if (t.state === 'receiving') { abortWriter(t); t.state = 'cancelled'; send({ type: 'cancel', id: t.id, from: 'receiver' }); renderIn(t); }
+    if (t.state === 'offered' || t.state === 'saving') { endIn(t, 'declined'); send({ type: 'decline', id: t.id }); }
+    else if (t.state === 'receiving') { endIn(t, 'cancelled'); send({ type: 'cancel', id: t.id, from: 'receiver' }); }
   }
 
   function abortWriter(t) {
@@ -728,15 +730,13 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       t.chunks.push(data);
       ack(t, got);
     }
-    renderIn(t);
+    render(t);
   }
 
   function fail(t, reason) {
     if (t.state !== 'receiving') return;
-    abortWriter(t);
-    t.state = 'failed'; t.error = reason;
+    endIn(t, 'failed', reason);
     send({ type: 'cancel', id: t.id, from: 'receiver' });
-    renderIn(t);
   }
 
   function onEof(id) {
@@ -752,10 +752,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         t.url = URL.createObjectURL(blob);
         download(t);
       }
-      t.state = 'done';
       ack(t, t.size);
       send({ type: 'done', id: t.id });
-      renderIn(t);
+      endIn(t, 'done');
     }).catch(() => fail(t, 'Could not save file'));
   }
 
@@ -767,10 +766,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function onCancel(m) {
     if (m.from === 'sender') {
       const t = incoming.get(inKey(m.id));
-      if (t && ['offered', 'saving', 'receiving'].includes(t.state)) { abortWriter(t); t.state = 'cancelled'; renderIn(t); }
+      if (t && IN_ACTIVE.includes(t.state)) endIn(t, 'cancelled');
     } else {
       const t = outgoing.get(m.id);
-      if (t && ['offered', 'sending', 'finishing'].includes(t.state)) { t.state = 'cancelled'; renderOut(t); }
+      if (t && OUT_ACTIVE.includes(t.state)) endOut(t, 'cancelled');
     }
   }
 
@@ -802,10 +801,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       lock.release().catch(() => {});
     }
   }
-  document.addEventListener('visibilitychange', () => {
-    // the browser releases the lock when the page is hidden; take it again on return
-    if (document.visibilityState === 'visible') { wakeFailed = false; updateWakeLock(); }
-  });
 
   // ---------- rendering ----------
   function createRow(t, isIn) {
@@ -837,64 +832,38 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     parts.filter(Boolean).forEach((p, i) => { const sp = el('span', i === 0 && cls ? cls : '', p); s.appendChild(sp); });
   }
 
-  function setActions(t, sig, build) {
-    if (t.ui.sig === sig) return;  // avoid rebuilding buttons on every progress tick
-    t.ui.sig = sig; t.ui.actions.textContent = ''; build(t.ui.actions);
-  }
-
   function btn(label, cls, fn) { const b = el('button', 'btn small ' + cls, label); b.type = 'button'; b.onclick = fn; return b; }
 
-  let renderPending = new Set(), rafScheduled = false;
-  function schedule(t, fn) {
-    renderPending.add(() => fn(t));
-    if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(() => { rafScheduled = false; const p = renderPending; renderPending = new Set(); p.forEach((f) => f()); updateAcceptAll(); updateWakeLock(); }); }
-  }
-  const renderOut = (t) => schedule(t, drawOut);
-  const renderIn = (t) => schedule(t, drawIn);
-
-  function drawOut(t) {
-    t.ui.row.className = 'item outgoing ' + t.state + (t.paused ? ' paused' : '');
-    const pct = t.size ? Math.min(100, t.acked / t.size * 100) : (t.state === 'done' ? 100 : 0);
-    t.ui.fill.style.width = pct + '%';
-    const size = fmtSize(t.size);
-    switch (t.state) {
-      case 'offered': setStatus(t, [peerConnected ? 'Waiting for the other device to accept' : 'Waiting for the other device to reconnect', size]); break;
-      case 'sending': case 'finishing':
-        if (t.paused) setStatus(t, ['Paused – waiting for the other device', Math.floor(pct) + '%', fmtSize(t.acked) + ' of ' + size], 'st-warn');
-        else setStatus(t, [Math.floor(pct) + '%', fmtSize(t.acked) + ' of ' + size, speed(t, t.acked)]);
-        break;
-      case 'done': setStatus(t, ['Sent', size], 'st-done'); break;
-      case 'declined': setStatus(t, ['Declined', size], 'st-err'); break;
-      case 'cancelled': setStatus(t, ['Cancelled', size], 'st-err'); break;
-      case 'failed': setStatus(t, [t.error || 'Failed', size], 'st-err'); break;
-    }
-    const active = ['offered', 'sending', 'finishing'].includes(t.state);
-    setActions(t, active ? 'cancel' : 'none', (a) => { if (active) a.append(btn('Cancel', 'ghost', () => cancelOutgoing(t))); });
+  // Rows are redrawn at most once per frame, however often progress changes.
+  const dirty = new Set();
+  function render(t) {
+    if (!dirty.size) requestAnimationFrame(() => { const ts = [...dirty]; dirty.clear(); ts.forEach(draw); updateAcceptAll(); updateWakeLock(); });
+    dirty.add(t);
   }
 
-  function drawIn(t) {
-    t.ui.row.className = 'item incoming ' + t.state + (t.paused ? ' paused' : '');
-    const pct = t.size ? Math.min(100, t.received / t.size * 100) : (t.state === 'done' ? 100 : 0);
+  function draw(t) {
+    const out = !!t.file, bytes = out ? t.acked : t.received;
+    t.ui.row.className = 'item ' + (out ? 'outgoing ' : 'incoming ') + t.state + (t.paused ? ' paused' : '');
+    const pct = t.size ? Math.min(100, bytes / t.size * 100) : (t.state === 'done' ? 100 : 0);
     t.ui.fill.style.width = pct + '%';
-    const size = fmtSize(t.size);
-    switch (t.state) {
-      case 'offered': setStatus(t, ['Wants to send you', size]); break;
-      case 'saving': setStatus(t, ['Choose where to save…', size]); break;
-      case 'receiving':
-        if (t.paused) setStatus(t, ['Paused – waiting for the other device', Math.floor(pct) + '%', fmtSize(t.received) + ' of ' + size], 'st-warn');
-        else setStatus(t, [Math.floor(pct) + '%', fmtSize(t.received) + ' of ' + size, speed(t, t.received)]);
-        break;
-      case 'done': setStatus(t, ['Received', size], 'st-done'); break;
-      case 'declined': setStatus(t, ['Declined', size], 'st-err'); break;
-      case 'cancelled': setStatus(t, ['Cancelled', size], 'st-err'); break;
-      case 'failed': setStatus(t, [t.error || 'Failed', size], 'st-err'); break;
+    const size = fmtSize(t.size), progress = [Math.floor(pct) + '%', fmtSize(bytes) + ' of ' + size];
+    const final = { done: out ? 'Sent' : 'Received', declined: 'Declined', cancelled: 'Cancelled', failed: t.error || 'Failed' }[t.state];
+    if (final) setStatus(t, [final, size], t.state === 'done' ? 'st-done' : 'st-err');
+    else if (t.paused) setStatus(t, ['Paused – waiting for the other device', ...progress], 'st-warn');
+    else if (t.state === 'offered') setStatus(t, [!out ? 'Wants to send you' : peerConnected
+      ? 'Waiting for the other device to accept' : 'Waiting for the other device to reconnect', size]);
+    else if (t.state === 'saving') setStatus(t, ['Choose where to save…', size]);
+    else setStatus(t, [...progress, speed(t, bytes)]);  // sending, finishing, receiving
+
+    const acts = out ? (OUT_ACTIVE.includes(t.state) ? [['Cancel', 'ghost', () => cancelOutgoing(t)]] : [])
+      : t.state === 'offered' ? [['Decline', 'ghost', () => declineIncoming(t)], ['Accept', 'primary', () => acceptIncoming(t)]]
+      : t.state === 'receiving' ? [['Cancel', 'ghost', () => declineIncoming(t)]]
+      : t.state === 'done' && t.url ? [['Save again', 'ghost', () => download(t)]] : [];
+    const sig = acts.map((a) => a[0]).join();
+    if (t.ui.sig !== sig) {  // keep buttons stable across progress updates
+      t.ui.sig = sig;
+      t.ui.actions.replaceChildren(...acts.map(([label, cls, fn]) => btn(label, cls, fn)));
     }
-    const sig = t.state + (t.url ? ':url' : '');
-    setActions(t, sig, (a) => {
-      if (t.state === 'offered') a.append(btn('Decline', 'ghost', () => declineIncoming(t)), btn('Accept', 'primary', () => acceptIncoming(t)));
-      else if (t.state === 'receiving') a.append(btn('Cancel', 'ghost', () => declineIncoming(t)));
-      else if (t.state === 'done' && t.url) a.append(btn('Save again', 'ghost', () => download(t)));
-    });
   }
 
   function updateAcceptAll() {
@@ -932,8 +901,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   });
   $('leaveBtn').addEventListener('click', () => { history.replaceState(null, '', location.pathname); leave(null); });
   window.addEventListener('beforeunload', (e) => {
-    const busy = [...outgoing.values(), ...incoming.values()].some((t) => ['sending', 'receiving', 'finishing'].includes(t.state));
-    if (busy) { e.preventDefault(); e.returnValue = ''; }
+    if (transfersBusy()) { e.preventDefault(); e.returnValue = ''; }
   });
   // Phones suspend sockets in the background; reconnect promptly on return.
   document.addEventListener('visibilitychange', wakeUp);

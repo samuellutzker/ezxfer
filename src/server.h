@@ -16,7 +16,4 @@ typedef struct {
 /* Runs the event loop. Returns non-zero on startup failure. */
 int server_run(const server_config *cfg);
 
-/* Best-effort LAN IPv4 address of this machine (falls back to 127.0.0.1). */
-void lan_address(char *out, unsigned outsz);
-
 #endif
