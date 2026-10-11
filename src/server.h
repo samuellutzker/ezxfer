@@ -9,7 +9,7 @@ typedef struct {
     const char *tls_cert;  /* PEM certificate chain; enables HTTPS when set */
     const char *tls_key;   /* PEM private key (defaults to tls_cert) */
     int session_timeout;   /* seconds an empty session waits for its devices to return */
-    int print_qr;          /* terminal QR code on startup: 0 off, 1 full size, 2 compact */
+    int print_qr;          /* terminal QR code on startup: 0 off, 1 compact, 2 full height */
     int quiet;
 } server_config;
 

@@ -40,8 +40,9 @@ Options:
                      how long a session waits for its devices to
                      reconnect after both dropped (default 120)
       --no-qr        don't print a QR code in the terminal
-      --compact-qr   print a half-height terminal QR code (may show
-                     gaps in terminals with extra line spacing)
+      --full-qr      print the terminal QR code at full height, for
+                     terminals that show gaps in the compact one
+                     (e.g. macOS Terminal)
   -q, --quiet        no banner or logging
 ```
 

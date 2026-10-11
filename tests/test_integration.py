@@ -665,9 +665,13 @@ def test_options():
         assert f"Open on this computer:  {SCHEME}://localhost:{port}/".encode() in out, out
         return out.decode()
 
-    # default: modules drawn as background-coloured cells (no glyphs, so no gaps
-    # between lines in any terminal); parse it back and check the finder patterns
+    # default: compact, two modules per line with half-block glyphs
     out = banner()
+    assert "█" in out
+
+    # --full-qr: modules drawn as background-coloured cells (no glyphs, so no gaps
+    # between lines in any terminal); parse it back and check the finder patterns
+    out = banner("--full-qr")
     assert "█" not in out and "\x1b[40m" in out
     grid = []
     for line in out.splitlines():
@@ -686,8 +690,6 @@ def test_options():
     for ox, oy in ((2, 2), (n - 5, 2), (2, n - 5)):
         assert [grid[oy + i][ox:ox + 7] for i in range(7)] == finder, (ox, oy)
 
-    out = banner("--compact-qr")
-    assert "█" in out  # half-block glyphs, two modules per line
     PASSED.append("startup_banner_qr")
     print("  ok  startup_banner_qr")
 

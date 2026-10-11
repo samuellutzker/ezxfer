@@ -28,8 +28,9 @@ static void usage(const char *prog)
             "                     how long a session waits for its devices to\n"
             "                     reconnect after both dropped (default 120)\n"
             "      --no-qr        don't print a QR code in the terminal\n"
-            "      --compact-qr   print a half-height terminal QR code (may show\n"
-            "                     gaps in terminals with extra line spacing)\n"
+            "      --full-qr      print the terminal QR code at full height, for\n"
+            "                     terminals that show gaps in the compact one\n"
+            "                     (e.g. macOS Terminal)\n"
             "  -q, --quiet        no banner or logging\n"
             "  -h, --help         show this help\n"
             "\n"
@@ -80,7 +81,7 @@ int main(int argc, char **argv)
             i++;
         } else if (!strcmp(a, "--no-qr")) {
             cfg.print_qr = 0;
-        } else if (!strcmp(a, "--compact-qr")) {
+        } else if (!strcmp(a, "--full-qr")) {
             cfg.print_qr = 2;
         } else if (!strcmp(a, "-q") || !strcmp(a, "--quiet")) {
             cfg.quiet = 1;
