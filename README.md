@@ -36,6 +36,9 @@ Options:
                      without it the server speaks plain HTTP
   -k, --key FILE     PEM private key for --cert (default: read the
                      key from the --cert file)
+  -t, --session-timeout SECONDS
+                     how long a session waits for its devices to
+                     reconnect after both dropped (default 120)
       --no-qr        don't print a QR code in the terminal
   -q, --quiet        no banner or logging
 ```
@@ -83,6 +86,14 @@ Files are relayed, never stored. Flow control works end to end:
 - The server stops reading from a sender once that sender's peer has more than 4 MB of output queued.
 
 Memory therefore stays bounded however large the file is.
+
+**Dropped connections resume.** Each page has a random client id, which it sends when connecting.
+- If a device's connection drops, for example a phone that loses Wi-Fi or locks its screen, transfers on both sides pause.
+- When the device reconnects with the same id, it takes back its slot in the session. This works even if the server hasn't yet noticed that the old connection died.
+- The receiver then tells the sender which byte to continue from.
+- Every data chunk carries its byte offset, so chunks left over from before the drop are discarded instead of being written in the wrong place.
+- If both devices drop, the session waits `--session-timeout` seconds (default 120) for them to return.
+- Reloading the page starts over, because the browser can't keep the selected file or the partial download across a reload.
 
 The join URL uses the address the page was opened with. If that was `localhost`, the server substitutes the machine's LAN IPv4 address. Use `--url` when running behind a reverse proxy or NAT.
 

@@ -26,6 +26,7 @@ SCHEME = "https" if TLS else "http"
 CERT_DIR = tempfile.mkdtemp(prefix="ezxfer-cert-")
 CERT, KEY = os.path.join(CERT_DIR, "cert.pem"), os.path.join(CERT_DIR, "key.pem")
 PASSED = []
+SESSION_TIMEOUT = 2  # seconds an empty session is kept in the main test server
 
 
 def make_cert(cert, key, cn="ezxfer-test"):
@@ -376,11 +377,66 @@ def ws_peer_leave_and_rejoin(srv):
     c.sock.close()
     assert b.recv_json() == {"type": "peer", "connected": False}
     b.close()
-    time.sleep(0.2)
-    # last device gone -> session destroyed
+    # last device gone -> the session waits a while for devices to come back...
+    time.sleep(0.3)
     d = WS(srv.port, "/ws?s=" + code)
-    assert d.recv_json()["code"] == "not_found"
-    d.sock.close()
+    assert d.recv_json()["session"] == code
+    d.close()
+    # ...and is destroyed once the timeout has passed with nobody in it
+    time.sleep(SESSION_TIMEOUT + 1.5)
+    e = WS(srv.port, "/ws?s=" + code)
+    assert e.recv_json()["code"] == "not_found"
+    e.sock.close()
+
+
+@test
+def ws_peer_ids_and_reconnect_takeover(srv):
+    a = WS(srv.port, "/ws?c=device-A")
+    code = a.recv_json()["session"]
+    b = WS(srv.port, f"/ws?s={code}&c=device_B")
+    b.recv_json()
+    assert a.recv_json() == {"type": "peer", "connected": True, "id": "device_B"}
+    assert b.recv_json() == {"type": "peer", "connected": True, "id": "device-A"}
+    # B's network dies silently; the server still thinks the old connection is alive.
+    # A different device is refused, but B coming back takes over its own slot.
+    c = WS(srv.port, f"/ws?s={code}&c=someone-else")
+    assert c.recv_json()["code"] == "full"
+    c.sock.close()
+    b2 = WS(srv.port, f"/ws?s={code}&c=device_B")
+    assert b2.recv_json()["session"] == code
+    assert b2.recv_json() == {"type": "peer", "connected": True, "id": "device-A"}
+    assert a.recv_json() == {"type": "peer", "connected": False}
+    assert a.recv_json() == {"type": "peer", "connected": True, "id": "device_B"}
+    assert b.expect_closed() == 4001  # the stale connection is closed
+    a.send_text("resumed")
+    assert b2.recv() == (0x1, b"resumed")
+    # invalid ids are ignored (treated as no id)
+    a.close()
+    assert b2.recv_json() == {"type": "peer", "connected": False}
+    d = WS(srv.port, f"/ws?s={code}&c=bad%22id")
+    d.recv_json()
+    assert b2.recv_json() == {"type": "peer", "connected": True}
+    for x in (b2, d):
+        x.close()
+
+
+@test
+def ws_both_drop_and_return(srv):
+    """Both devices lose their connection; the session waits for them."""
+    a = WS(srv.port, "/ws?c=one")
+    code = a.recv_json()["session"]
+    b = WS(srv.port, f"/ws?s={code}&c=two")
+    b.recv_json(), a.recv_json(), b.recv_json()
+    a.sock.close()
+    b.sock.close()
+    time.sleep(0.3)
+    a2 = WS(srv.port, f"/ws?s={code}&c=one")
+    assert a2.recv_json()["session"] == code
+    b2 = WS(srv.port, f"/ws?s={code}&c=two")
+    assert b2.recv_json()["session"] == code
+    assert a2.recv_json()["id"] == "two" and b2.recv_json()["id"] == "one"
+    a2.close()
+    b2.close()
 
 
 @test
@@ -586,6 +642,8 @@ def test_options():
     assert r.returncode == 2
     r = subprocess.run([BIN, "--help"], capture_output=True)
     assert r.returncode == 0 and b"Usage" in r.stderr
+    r = subprocess.run([BIN, "--session-timeout", "-1"], capture_output=True)
+    assert r.returncode == 2
     r = subprocess.run([BIN, "--key", KEY], capture_output=True)
     assert r.returncode == 2 and b"--key requires --cert" in r.stderr
     r = subprocess.run([BIN, "--cert", "/nonexistent.pem", "-q"], capture_output=True)
@@ -639,7 +697,7 @@ def test_tls_options():
 def main():
     make_cert(CERT, KEY)
     print(f"mode: {'HTTPS/WSS' if TLS else 'plain HTTP/WS'}")
-    srv = Server()
+    srv = Server("--session-timeout", str(SESSION_TIMEOUT))
     prefixes = ("http_", "ws_", "tls_") if TLS else ("http_", "ws_")
     try:
         for name, fn in list(globals().items()):

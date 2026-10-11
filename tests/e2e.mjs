@@ -243,6 +243,41 @@ try {
   const [dl2] = await Promise.all([B.waitForEvent('download'), row(B, 'inList', 'after.bin').getByRole('button', { name: 'Accept' }).click()]);
   assert(sha(fs.readFileSync(await dl2.path())) === sha(after), 'post-cancel transfer intact');
   ok('connection keeps working after cancellations');
+
+  // ---------- resume: receiving phone loses its network mid-transfer ----------
+  const progress = (page, name) => page.evaluate((n) => (window.ezxfer.transfers().find((t) => t.name === n) || {}).bytes || 0, name);
+  const bigPath = path.join(OUT, 'movie.mov');
+  fs.writeFileSync(bigPath, randomBytes(80 * 1024 * 1024));
+  const bigSha = sha(fs.readFileSync(bigPath));
+  await A.setInputFiles('#fileInput', bigPath);
+  const dlBig = B.waitForEvent('download', { timeout: 120000 });
+  await row(B, 'inList', 'movie.mov').getByRole('button', { name: 'Accept' }).click();
+  await B.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'movie.mov') || {}).bytes > 20e6);
+  await B.evaluate(() => window.ezxfer.dropConnection(true));  // vanishes without closing the socket
+  const pausedAt = await progress(B, 'movie.mov');
+  assert((await B.evaluate(() => window.ezxfer.transfers().find((t) => t.name === 'movie.mov').paused)), 'phone shows paused');
+  const got80 = fs.readFileSync(await (await dlBig).path());
+  assert(got80.length === 80 * 1024 * 1024 && sha(got80) === bigSha, 'resumed download identical');
+  assert((await B.evaluate(() => window.ezxfer.resumes)) >= 1, 'phone resumed');
+  await row(A, 'outList', 'movie.mov').locator('.st-done').waitFor();
+  fs.unlinkSync(bigPath);
+  ok('receiver drops mid-transfer, reconnects and resumes; bytes identical', `paused at ${(pausedAt / 1e6).toFixed(0)} MB`);
+
+  // ---------- resume: sending phone's connection closes mid-transfer ----------
+  const upPath = path.join(OUT, 'VID_0001.mp4');
+  fs.writeFileSync(upPath, randomBytes(48 * 1024 * 1024));
+  const upSha = sha(fs.readFileSync(upPath));
+  await B.setInputFiles('#fileInput', upPath);
+  await row(A, 'inList', 'VID_0001.mp4').getByRole('button', { name: 'Accept' }).click();
+  await B.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'VID_0001.mp4') || {}).bytes > 12e6);
+  await B.evaluate(() => window.ezxfer.dropConnection(false));
+  await A.waitForFunction(() => window.__saved && window.__saved['VID_0001.mp4'], null, { timeout: 120000 });
+  const upSaved = await A.evaluate(() => window.__saved['VID_0001.mp4']);
+  assert(upSaved.sha === upSha, 'resumed upload identical');
+  assert((await A.evaluate(() => window.ezxfer.resumes)) >= 1, 'desktop resumed');
+  await row(B, 'outList', 'VID_0001.mp4').locator('.st-done').waitFor();
+  fs.unlinkSync(upPath);
+  ok('sender drops mid-transfer, reconnects and resumes; bytes identical');
   await A.screenshot({ path: path.join(OUT, 'desktop-transfers.png') });
   await B.screenshot({ path: path.join(OUT, 'phone-transfers.png'), fullPage: true });
 

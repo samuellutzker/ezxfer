@@ -65,11 +65,13 @@ typedef struct conn {
     time_t last_rx, last_ping, created;
     char host[256];
     char addr[64];
+    char cid[65]; /* client id chosen by the page; lets a device reclaim its slot */
 } conn;
 
 typedef struct session {
     char code[CODE_LEN + 1];
     conn *peer[2];
+    time_t empty_since; /* both devices gone: kept for cfg->session_timeout seconds */
 } session;
 
 static const server_config *g_cfg;
@@ -231,12 +233,24 @@ static session *session_find(const char *code)
     return NULL;
 }
 
+static void session_destroy(session *s);
+
+static int session_empty(const session *s) { return !s->peer[0] && !s->peer[1]; }
+
 static session *session_create(void)
 {
-    int slot = -1;
-    for (int i = 0; i < MAX_SESSIONS && slot < 0; i++)
+    int slot = -1, oldest = -1;
+    for (int i = 0; i < MAX_SESSIONS && slot < 0; i++) {
         if (!g_sessions[i])
             slot = i;
+        else if (session_empty(g_sessions[i]) &&
+                 (oldest < 0 || g_sessions[i]->empty_since < g_sessions[oldest]->empty_since))
+            oldest = i;
+    }
+    if (slot < 0 && oldest >= 0) { /* all slots used: recycle the longest-abandoned one */
+        session_destroy(g_sessions[oldest]);
+        slot = oldest;
+    }
     if (slot < 0)
         return NULL;
     session *s = calloc(1, sizeof *s);
@@ -328,24 +342,33 @@ static void http_error(conn *c, int status, const char *reason)
 
 /* ---------------- connection lifecycle ---------------- */
 
+/* Removes c from its session and tells the other device. An empty session is
+ * kept for a while so devices that lost their connection can come back. */
+static void session_detach(conn *c)
+{
+    session *s = c->sess;
+    if (!s)
+        return;
+    conn *peer = session_peer(c);
+    for (int i = 0; i < 2; i++)
+        if (s->peer[i] == c)
+            s->peer[i] = NULL;
+    c->sess = NULL;
+    if (peer) {
+        ws_send_text(peer, "{\"type\":\"peer\",\"connected\":false}");
+        logf_("session %s: peer %s left", s->code, c->addr);
+    } else {
+        s->empty_since = time(NULL);
+        logf_("session %s: empty, kept for %ds", s->code, g_cfg->session_timeout);
+    }
+}
+
 static void conn_free(conn *c)
 {
     for (int i = 0; i < MAX_CONNS; i++)
         if (g_conns[i] == c)
             g_conns[i] = NULL;
-    if (c->sess) {
-        session *s = c->sess;
-        conn *peer = session_peer(c);
-        for (int i = 0; i < 2; i++)
-            if (s->peer[i] == c)
-                s->peer[i] = NULL;
-        if (peer) {
-            ws_send_text(peer, "{\"type\":\"peer\",\"connected\":false}");
-            logf_("session %s: peer %s left", s->code, c->addr);
-        } else {
-            session_destroy(s);
-        }
-    }
+    session_detach(c);
     tls_free(c->tls);
     close(c->fd);
     buf_free(&c->in);
@@ -406,6 +429,30 @@ static void serve_qr(conn *c, const http_request *req)
     free(svg);
 }
 
+/* Client ids are opaque tokens: [A-Za-z0-9_-], at most 64 characters. */
+static int valid_client_id(const char *s)
+{
+    if (!*s)
+        return 0;
+    for (; *s; s++)
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') ||
+              *s == '-' || *s == '_'))
+            return 0;
+    return 1;
+}
+
+/* Tells `to` that `other` is connected, including other's client id if any. */
+static void send_peer_connected(conn *to, const conn *other)
+{
+    char msg[160];
+    if (other->cid[0])
+        snprintf(msg, sizeof msg, "{\"type\":\"peer\",\"connected\":true,\"id\":\"%s\"}",
+                 other->cid);
+    else
+        snprintf(msg, sizeof msg, "{\"type\":\"peer\",\"connected\":true}");
+    ws_send_text(to, msg);
+}
+
 static void normalize_code(char *s)
 {
     for (; *s; s++)
@@ -441,6 +488,9 @@ static void ws_upgrade(conn *c, const http_request *req)
     char code[32] = "";
     query_param(req->query, "s", code, sizeof code);
     normalize_code(code);
+    char cid[sizeof c->cid] = "";
+    if (query_param(req->query, "c", cid, sizeof cid) > 0 && valid_client_id(cid))
+        snprintf(c->cid, sizeof c->cid, "%s", cid);
 
     session *s;
     int slot;
@@ -452,7 +502,19 @@ static void ws_upgrade(conn *c, const http_request *req)
             ws_close(c, 4004, "not found");
             return;
         }
-        slot = !s->peer[0] ? 0 : !s->peer[1] ? 1 : -1;
+        /* The same device reconnecting replaces its old connection, which may
+         * not have noticed yet that the network went away. */
+        slot = -1;
+        for (int i = 0; i < 2 && slot < 0; i++)
+            if (s->peer[i] && c->cid[0] && strcmp(s->peer[i]->cid, c->cid) == 0) {
+                conn *old = s->peer[i];
+                logf_("session %s: %s reconnected, replacing its old connection", s->code, c->addr);
+                session_detach(old);
+                ws_close(old, 4001, "replaced");
+                slot = i;
+            }
+        if (slot < 0)
+            slot = !s->peer[0] ? 0 : !s->peer[1] ? 1 : -1;
         if (slot < 0) {
             ws_send_text(c, "{\"type\":\"error\",\"code\":\"full\","
                             "\"message\":\"This session already has two devices\"}");
@@ -483,8 +545,8 @@ static void ws_upgrade(conn *c, const http_request *req)
     conn *peer = session_peer(c);
     if (peer) {
         logf_("session %s: %s joined, peers connected", s->code, c->addr);
-        ws_send_text(c, "{\"type\":\"peer\",\"connected\":true}");
-        ws_send_text(peer, "{\"type\":\"peer\",\"connected\":true}");
+        send_peer_connected(c, peer);
+        send_peer_connected(peer, c);
     }
 }
 
@@ -753,6 +815,11 @@ static void accept_new(int lfd)
 static void housekeeping(void)
 {
     time_t now = time(NULL);
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session *s = g_sessions[i];
+        if (s && session_empty(s) && now - s->empty_since >= g_cfg->session_timeout)
+            session_destroy(s);
+    }
     for (int i = 0; i < MAX_CONNS; i++) {
         conn *c = g_conns[i];
         if (!c)
@@ -971,6 +1038,9 @@ int server_run(const server_config *cfg)
     for (int i = 0; i < MAX_CONNS; i++)
         if (g_conns[i])
             conn_free(g_conns[i]);
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_sessions[i])
+            session_destroy(g_sessions[i]);
     close(lfd);
     free(g_template);
     tls_cleanup();

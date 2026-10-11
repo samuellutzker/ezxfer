@@ -8,6 +8,7 @@ typedef struct {
     const char *web_file;  /* optional: serve this HTML template instead of the built-in */
     const char *tls_cert;  /* PEM certificate chain; enables HTTPS when set */
     const char *tls_key;   /* PEM private key (defaults to tls_cert) */
+    int session_timeout;   /* seconds an empty session waits for its devices to return */
     int print_qr;          /* print a terminal QR code on startup */
     int quiet;
 } server_config;

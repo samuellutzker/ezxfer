@@ -138,9 +138,11 @@ body:not(.connected) .locked { display: block; }
 .status { font-size: 12.5px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
 .status .st-done { color: var(--ok); }
 .status .st-err { color: var(--err); }
+.status .st-warn { color: var(--warn); }
 .bar { height: 5px; border-radius: 99px; background: rgba(127,127,127,.18); overflow: hidden; margin-top: 7px; display: none; }
 .bar i { display: block; height: 100%; width: 0; background: var(--grad); border-radius: 99px; transition: width .2s; }
 .item.sending .bar, .item.receiving .bar, .item.finishing .bar { display: block; }
+.item.paused .bar i { background: var(--warn); }
 .actions { display: flex; gap: 6px; }
 @media (max-width: 480px) {
   .wrap { padding: 14px 12px 32px; }
@@ -228,6 +230,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const MAX_BUFFERED = 4 * 1024 * 1024;  // WebSocket send buffer limit
   const MAX_INFLIGHT = 16 * 1024 * 1024; // sent but not yet acknowledged
   const ACK_EVERY = 1024 * 1024;
+  const HDR = 12;                        // binary header: u32 transfer id, u64 byte offset
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -236,10 +239,14 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   let ws = null, session = null, peerConnected = false, joinUrl = '';
   let intentionalClose = false, reconnectDelay = 800;
   let nextId = 1;
-  let peerEpoch = 0;          // bumps per peer connection; ids are only unique per sender page
+  // Identifies this page to the server and the other device. A device that
+  // reconnects with the same id gets its session slot back and transfers resume.
+  const clientId = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
+  let peerId = '';            // the other device's client id
+  let resumes = 0;            // transfers continued after a reconnect (exposed for tests)
   const outgoing = new Map(); // id -> transfer we send
-  const incoming = new Map(); // "epoch:id" -> transfer we receive
-  const inKey = (id) => peerEpoch + ':' + (id >>> 0);
+  const incoming = new Map(); // "peerId:id" -> transfer we receive (ids are only unique per sender page)
+  const inKey = (id) => peerId + ':' + (id >>> 0);
   const sendQueue = [];
   let pumping = false;
 
@@ -281,7 +288,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function connect(code) {
     intentionalClose = false;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const sock = new WebSocket(proto + '//' + location.host + '/ws' + (code ? '?s=' + encodeURIComponent(code) : ''));
+    const sock = new WebSocket(proto + '//' + location.host + '/ws?c=' + clientId + (code ? '&s=' + encodeURIComponent(code) : ''));
     sock.binaryType = 'arraybuffer';
     ws = sock;
     setPill('wait', code ? 'Joining…' : 'Connecting…');
@@ -293,15 +300,18 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       } else onBinary(e.data);
     };
     sock.onopen = () => { reconnectDelay = 800; };
-    sock.onclose = () => {
-      if (sock !== ws) return;
-      setPeer(false);
-      failActive('Connection lost');
-      if (intentionalClose) return;
-      setPill('off', 'Reconnecting…');
-      setTimeout(() => { if (ws === sock) connect(session); }, reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, 8000);
-    };
+    sock.onclose = () => socketLost(sock);
+  }
+
+  // Our connection dropped: keep transfers paused and rejoin the same session.
+  function socketLost(sock) {
+    if (sock !== ws) return;
+    setPeer(false);
+    if (intentionalClose) { failActive('Disconnected'); return; }
+    pauseActive();
+    setPill('off', 'Reconnecting…');
+    setTimeout(() => { if (ws === sock) connect(session); }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
   }
 
   function leave(newCode) {
@@ -325,14 +335,23 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         if (!peerConnected) setPill('wait', 'Waiting for device');
         break;
       case 'peer':
-        if (m.connected) peerEpoch++;
-        setPeer(!!m.connected);
-        if (m.connected) { send({ type: 'info', name: deviceName() }); toast('Device connected'); }
-        else { failActive('Other device disconnected'); toast('Device disconnected', true); }
+        if (m.connected) {
+          const id = String(m.id || '');
+          const same = id !== '' && id === peerId;
+          if (!same) { failActive('The other device left'); peerId = id; }
+          setPeer(true);
+          send({ type: 'info', name: deviceName() });
+          if (same) { resumeWithPeer(); toast('Device reconnected'); } else toast('Device connected');
+        } else {
+          setPeer(false);
+          pauseActive();
+          toast('Device disconnected — waiting for it to come back', true);
+        }
         break;
       case 'error':
-        // Unknown or full session: start a fresh one instead
+        // Unknown, expired or full session: start a fresh one instead
         intentionalClose = true;
+        failActive('Session ended');
         toast(m.message || 'Error', true);
         session = null;
         history.replaceState(null, '', location.pathname);
@@ -340,12 +359,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         break;
       case 'info': $('peerName').textContent = String(m.name || 'Device').slice(0, 40); break;
       case 'offer': addIncoming(m); break;
-      case 'accept': onAccepted(m.id); break;
+      case 'accept': onAccepted(m); break;
       case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') { t.state = 'declined'; renderOut(t); } break; }
       case 'cancel': onCancel(m); break;
-      case 'ack': { const t = outgoing.get(m.id); if (t) { t.acked = m.bytes; renderOut(t); } break; }
+      case 'ack': { const t = outgoing.get(m.id); if (t && (t.state === 'sending' || t.state === 'finishing')) { t.acked = Math.min(t.size, Math.max(t.acked, +m.bytes || 0)); renderOut(t); } break; }
       case 'eof': onEof(m.id); break;
-      case 'done': { const t = outgoing.get(m.id); if (t) { t.acked = t.size; t.state = 'done'; renderOut(t); } break; }
+      case 'done': { const t = outgoing.get(m.id); if (t && ['offered', 'sending', 'finishing'].includes(t.state)) { t.acked = t.size; t.state = 'done'; t.paused = false; renderOut(t); } break; }
     }
   }
 
@@ -359,17 +378,47 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   function failActive(reason) {
     for (const t of outgoing.values())
-      if (['offered', 'sending', 'finishing'].includes(t.state)) { t.state = 'failed'; t.error = reason; renderOut(t); }
+      if (['offered', 'sending', 'finishing'].includes(t.state)) { t.state = 'failed'; t.paused = false; t.error = reason; renderOut(t); }
     for (const t of incoming.values())
-      if (['offered', 'saving', 'receiving'].includes(t.state)) { abortWriter(t); t.state = 'failed'; t.error = reason; renderIn(t); }
+      if (['offered', 'saving', 'receiving'].includes(t.state)) { abortWriter(t); t.state = 'failed'; t.paused = false; t.error = reason; renderIn(t); }
     sendQueue.length = 0;
+  }
+
+  // A connection dropped: running transfers wait (data, files and writers are kept).
+  function pauseActive() {
+    for (const t of outgoing.values())
+      if (t.state === 'sending' || t.state === 'finishing') { t.paused = true; renderOut(t); }
+    for (const t of incoming.values())
+      if (t.state === 'receiving') { t.paused = true; renderIn(t); }
+    sendQueue.length = 0;
+  }
+
+  // The same device is back. Messages may have been lost in the gap, so each side
+  // repeats what matters; duplicates are ignored. Receivers say where to continue.
+  function resumeWithPeer() {
+    for (const t of outgoing.values()) {
+      if (t.state === 'offered') send({ type: 'offer', id: t.id, name: t.name, size: t.size, mime: t.file.type || '' });
+      else if (t.state === 'cancelled') send({ type: 'cancel', id: t.id, from: 'sender' });
+    }
+    for (const t of incoming.values()) {
+      if (t.peer !== peerId) continue;
+      if (t.state === 'receiving') {
+        t.paused = false; t.lastAck = t.received;
+        t.started = performance.now(); t.base = t.received;
+        if (t.received > 0) resumes++;
+        send({ type: 'accept', id: t.id, offset: t.received });
+        renderIn(t);
+      } else if (t.state === 'declined') send({ type: 'decline', id: t.id });
+      else if (t.state === 'cancelled' || t.state === 'failed') send({ type: 'cancel', id: t.id, from: 'receiver' });
+      else if (t.state === 'done') send({ type: 'done', id: t.id });
+    }
   }
 
   // ---------- sending ----------
   function offerFiles(files) {
     if (!peerConnected) { toast('Connect a device first', true); return; }
     for (const file of files) {
-      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0 };
+      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0, base: 0, gen: 0, paused: false };
       outgoing.set(t.id, t);
       createRow(t, false);
       renderOut(t);
@@ -377,12 +426,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     }
   }
 
-  function onAccepted(id) {
-    const t = outgoing.get(id);
-    if (!t || t.state !== 'offered') return;
-    t.state = 'sending'; t.started = performance.now();
+  // "accept" starts a transfer, or continues it from `offset` after a reconnect.
+  function onAccepted(m) {
+    const t = outgoing.get(m.id);
+    if (!t || !['offered', 'sending', 'finishing'].includes(t.state)) return;
+    const offset = Math.max(0, Math.min(t.size, Math.floor(+m.offset || 0)));
+    t.gen++;                       // invalidates any chunk read for the old position
+    t.sent = t.acked = t.base = offset;
+    t.started = performance.now();
+    t.state = 'sending'; t.paused = false;
     renderOut(t);
-    sendQueue.push(t);
+    if (!sendQueue.includes(t)) sendQueue.push(t);
     pump();
   }
 
@@ -392,25 +446,29 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     try {
       while (sendQueue.length) {
         const t = sendQueue[0];
-        const sock = ws;
-        while (t.state === 'sending' && t.sent < t.size) {
-          if (!sock || sock.readyState !== 1 || sock !== ws) return;
+        while (t.state === 'sending' && !t.paused && t.sent < t.size) {
+          const sock = ws;
+          if (!sock || sock.readyState !== 1) return;  // resumes after reconnecting
           if (sock.bufferedAmount > MAX_BUFFERED || t.sent - t.acked > MAX_INFLIGHT) { await sleep(10); continue; }
-          const end = Math.min(t.sent + CHUNK, t.size);
+          const gen = t.gen, start = t.sent, end = Math.min(start + CHUNK, t.size);
           let buf;
-          try { buf = await t.file.slice(t.sent, end).arrayBuffer(); }
+          try { buf = await t.file.slice(start, end).arrayBuffer(); }
           catch (e) { t.state = 'failed'; t.error = 'Could not read file'; send({ type: 'cancel', id: t.id, from: 'sender' }); break; }
-          if (t.state !== 'sending' || sock !== ws) break;
-          const frame = new Uint8Array(4 + buf.byteLength);
-          new DataView(frame.buffer).setUint32(0, t.id);
-          frame.set(new Uint8Array(buf), 4);
+          if (t.gen !== gen || t.state !== 'sending' || t.paused || sock !== ws) continue;  // moved on meanwhile
+          const frame = new Uint8Array(HDR + buf.byteLength);
+          const dv = new DataView(frame.buffer);
+          dv.setUint32(0, t.id);
+          dv.setUint32(4, Math.floor(start / 4294967296));
+          dv.setUint32(8, start >>> 0);
+          frame.set(new Uint8Array(buf), HDR);
           sock.send(frame);
           t.sent = end;
           renderOut(t);
         }
-        if (t.state === 'sending') { send({ type: 'eof', id: t.id }); t.state = 'finishing'; }
+        if (t.state === 'sending' && !t.paused && t.sent >= t.size) { send({ type: 'eof', id: t.id }); t.state = 'finishing'; }
         renderOut(t);
-        sendQueue.shift();
+        const qi = sendQueue.indexOf(t);
+        if (qi >= 0) sendQueue.splice(qi, 1);
       }
     } finally { pumping = false; }
   }
@@ -426,8 +484,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function addIncoming(m) {
     const id = m.id >>> 0;
     if (incoming.has(inKey(id))) return;
-    const t = { id, name: String(m.name || 'file').slice(0, 255), size: Math.max(0, +m.size || 0), mime: String(m.mime || ''),
-                received: 0, lastAck: 0, state: 'offered', writer: null, chunks: null, chain: Promise.resolve(), started: 0 };
+    const t = { id, peer: peerId, name: String(m.name || 'file').slice(0, 255), size: Math.max(0, +m.size || 0), mime: String(m.mime || ''),
+                received: 0, lastAck: 0, state: 'offered', writer: null, chunks: null, chain: Promise.resolve(), started: 0, base: 0, paused: false };
     incoming.set(inKey(id), t);
     createRow(t, true);
     renderIn(t);
@@ -451,7 +509,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     t.writer = writer;
     t.chunks = writer ? null : [];
     t.state = 'receiving'; t.started = performance.now();
-    send({ type: 'accept', id: t.id });
+    // if the connection dropped while the save dialog was open, accepting is
+    // repeated when the other device is back (see resumeWithPeer)
+    t.paused = !peerConnected;
+    send({ type: 'accept', id: t.id, offset: 0 });
     renderIn(t);
   }
 
@@ -470,10 +531,14 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function onBinary(buf) {
-    if (buf.byteLength < 4) return;
-    const t = incoming.get(inKey(new DataView(buf).getUint32(0)));
-    if (!t || t.state !== 'receiving') return;
-    const data = new Uint8Array(buf, 4);
+    if (buf.byteLength < HDR) return;
+    const dv = new DataView(buf);
+    const t = incoming.get(inKey(dv.getUint32(0)));
+    if (!t || t.state !== 'receiving' || t.paused) return;
+    // Only the next expected bytes are used; anything else is left over from
+    // before a reconnect and the sender is already re-sending from t.received.
+    if (dv.getUint32(4) * 4294967296 + dv.getUint32(8) !== t.received) return;
+    const data = new Uint8Array(buf, HDR);
     t.received += data.byteLength;
     const got = t.received;
     if (t.received > t.size) { fail(t, 'Received more data than announced'); return; }
@@ -500,8 +565,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const t = incoming.get(inKey(id));
     if (!t || t.state !== 'receiving') return;
     t.chain.then(async () => {
-      if (t.state !== 'receiving') return;
-      if (t.received !== t.size) { fail(t, 'Transfer incomplete'); return; }
+      // an early "eof" is a leftover from before a reconnect; the resumed stream ends with its own
+      if (t.state !== 'receiving' || t.paused || t.received !== t.size) return;
       if (t.writer) { await t.writer.close(); t.writer = null; }
       else {
         const blob = new Blob(t.chunks, { type: t.mime || 'application/octet-stream' });
@@ -586,7 +651,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   function speed(t, bytes) {
     const s = (performance.now() - t.started) / 1000;
-    return s > 0.3 ? fmtSize(bytes / s) + '/s' : '';
+    return s > 0.3 ? fmtSize((bytes - (t.base || 0)) / s) + '/s' : '';
   }
 
   function setStatus(t, parts, cls) {
@@ -610,13 +675,16 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const renderIn = (t) => schedule(t, drawIn);
 
   function drawOut(t) {
-    t.ui.row.className = 'item outgoing ' + t.state;
+    t.ui.row.className = 'item outgoing ' + t.state + (t.paused ? ' paused' : '');
     const pct = t.size ? Math.min(100, t.acked / t.size * 100) : (t.state === 'done' ? 100 : 0);
     t.ui.fill.style.width = pct + '%';
     const size = fmtSize(t.size);
     switch (t.state) {
       case 'offered': setStatus(t, ['Waiting for the other device to accept', size]); break;
-      case 'sending': case 'finishing': setStatus(t, [Math.floor(pct) + '%', fmtSize(t.acked) + ' of ' + size, speed(t, t.acked)]); break;
+      case 'sending': case 'finishing':
+        if (t.paused) setStatus(t, ['Paused – waiting for the other device', Math.floor(pct) + '%', fmtSize(t.acked) + ' of ' + size], 'st-warn');
+        else setStatus(t, [Math.floor(pct) + '%', fmtSize(t.acked) + ' of ' + size, speed(t, t.acked)]);
+        break;
       case 'done': setStatus(t, ['Sent', size], 'st-done'); break;
       case 'declined': setStatus(t, ['Declined', size], 'st-err'); break;
       case 'cancelled': setStatus(t, ['Cancelled', size], 'st-err'); break;
@@ -627,14 +695,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function drawIn(t) {
-    t.ui.row.className = 'item incoming ' + t.state;
+    t.ui.row.className = 'item incoming ' + t.state + (t.paused ? ' paused' : '');
     const pct = t.size ? Math.min(100, t.received / t.size * 100) : (t.state === 'done' ? 100 : 0);
     t.ui.fill.style.width = pct + '%';
     const size = fmtSize(t.size);
     switch (t.state) {
       case 'offered': setStatus(t, ['Wants to send you', size]); break;
       case 'saving': setStatus(t, ['Choose where to save…', size]); break;
-      case 'receiving': setStatus(t, [Math.floor(pct) + '%', fmtSize(t.received) + ' of ' + size, speed(t, t.received)]); break;
+      case 'receiving':
+        if (t.paused) setStatus(t, ['Paused – waiting for the other device', Math.floor(pct) + '%', fmtSize(t.received) + ' of ' + size], 'st-warn');
+        else setStatus(t, [Math.floor(pct) + '%', fmtSize(t.received) + ' of ' + size, speed(t, t.received)]);
+        break;
       case 'done': setStatus(t, ['Received', size], 'st-done'); break;
       case 'declined': setStatus(t, ['Declined', size], 'st-err'); break;
       case 'cancelled': setStatus(t, ['Cancelled', size], 'st-err'); break;
@@ -692,7 +763,18 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   });
 
   // expose a tiny hook for automated tests
-  window.ezxfer = { get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; } };
+  window.ezxfer = {
+    get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; },
+    get resumes() { return resumes; },
+    transfers: () => [...outgoing.values(), ...incoming.values()].map((t) => ({
+      name: t.name, dir: t.file ? 'out' : 'in', state: t.state, paused: !!t.paused, bytes: t.file ? t.acked : t.received })),
+    // Simulates losing the network: `abandon` drops the socket without closing it, like a
+    // phone going out of range, so the server only learns about it when the device returns.
+    dropConnection(abandon) {
+      const s = ws; if (!s) return;
+      if (abandon) { s.onmessage = null; s.onclose = null; socketLost(s); } else s.close();
+    },
+  };
 
   const initial = new URLSearchParams(location.search).get('s');
   connect(initial ? initial.toUpperCase() : null);

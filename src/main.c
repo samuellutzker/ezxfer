@@ -24,6 +24,9 @@ static void usage(const char *prog)
             "                     without it the server speaks plain HTTP\n"
             "  -k, --key FILE     PEM private key for --cert (default: read the\n"
             "                     key from the --cert file)\n"
+            "  -t, --session-timeout SECONDS\n"
+            "                     how long a session waits for its devices to\n"
+            "                     reconnect after both dropped (default 120)\n"
             "      --no-qr        don't print a QR code in the terminal\n"
             "  -q, --quiet        no banner or logging\n"
             "  -h, --help         show this help\n"
@@ -34,7 +37,8 @@ static void usage(const char *prog)
 
 int main(int argc, char **argv)
 {
-    server_config cfg = {.bind_addr = "0.0.0.0", .port = 8080, .print_qr = 1};
+    server_config cfg = {.bind_addr = "0.0.0.0", .port = 8080, .session_timeout = 120,
+                         .print_qr = 1};
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -62,6 +66,15 @@ int main(int argc, char **argv)
             i++;
         } else if ((!strcmp(a, "-k") || !strcmp(a, "--key")) && next) {
             cfg.tls_key = next;
+            i++;
+        } else if ((!strcmp(a, "-t") || !strcmp(a, "--session-timeout")) && next) {
+            char *end;
+            long t = strtol(next, &end, 10);
+            if (*end || t < 0 || t > 86400) {
+                fprintf(stderr, "invalid session timeout: %s\n", next);
+                return 2;
+            }
+            cfg.session_timeout = (int)t;
             i++;
         } else if (!strcmp(a, "--no-qr")) {
             cfg.print_qr = 0;
