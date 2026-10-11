@@ -27,7 +27,7 @@
 #define MSG_NOSIGNAL 0 /* SIGPIPE is ignored globally */
 #endif
 
-#define EZX_VERSION "1.0.0"
+#define EZX_VERSION "1.1.0"
 
 #define MAX_CONNS 512
 #define MAX_SESSIONS 256
@@ -39,6 +39,7 @@
 #define WS_PING_INTERVAL 20
 #define WS_TIMEOUT 60
 #define CODE_LEN 6
+#define APP_PING "{\"type\":\"ping\"}"
 
 static const char CODE_ALPHABET[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -383,22 +384,45 @@ static void conn_free(conn *c)
 static char *g_template; /* contents of --web file, if any */
 static size_t g_template_len;
 
+/* Identifies the page and service worker being served. Pages compare it with
+ * the one in "hello" and reload when they are older than the server, so a
+ * page left open across a server upgrade never talks an outdated protocol. */
+static char g_build[17];
+
+static void compute_build_id(void)
+{
+    uint64_t h = 0xcbf29ce484222325ull; /* FNV-1a */
+    const uint8_t *parts[2] = {g_template ? (const uint8_t *)g_template : index_html, sw_js};
+    size_t lens[2] = {g_template ? g_template_len : index_html_len, sw_js_len};
+    for (int p = 0; p < 2; p++)
+        for (size_t i = 0; i < lens[p]; i++)
+            h = (h ^ parts[p][i]) * 0x100000001b3ull;
+    snprintf(g_build, sizeof g_build, "%016llx", (unsigned long long)h);
+}
+
 static void serve_index(conn *c)
 {
     const char *src = g_template ? g_template : (const char *)index_html;
     size_t len = g_template ? g_template_len : index_html_len;
-    /* Template substitution: {{VERSION}} */
-    static const char ph[] = "{{VERSION}}";
+    /* Template substitution: {{VERSION}} and {{BUILD}} */
+    static const struct { const char *ph; const char *val; } subst[] = {
+        {"{{VERSION}}", EZX_VERSION}, {"{{BUILD}}", g_build}};
     buffer b = {0};
     size_t i = 0;
     while (i < len) {
-        const char *hit = memmem(src + i, len - i, ph, sizeof ph - 1);
-        size_t chunk = hit ? (size_t)(hit - (src + i)) : len - i;
-        buf_append(&b, src + i, chunk);
-        i += chunk;
-        if (hit) {
-            buf_append(&b, EZX_VERSION, strlen(EZX_VERSION));
-            i += sizeof ph - 1;
+        size_t next = len, which = 0;
+        for (size_t k = 0; k < sizeof subst / sizeof subst[0]; k++) {
+            const char *hit = memmem(src + i, len - i, subst[k].ph, strlen(subst[k].ph));
+            if (hit && (size_t)(hit - src) < next) {
+                next = (size_t)(hit - src);
+                which = k;
+            }
+        }
+        buf_append(&b, src + i, next - i);
+        i = next;
+        if (next < len) {
+            buf_append(&b, subst[which].val, strlen(subst[which].val));
+            i += strlen(subst[which].ph);
         }
     }
     http_respond(c, 200, "OK", "text/html; charset=utf-8", b.d, b.len,
@@ -539,8 +563,9 @@ static void ws_upgrade(conn *c, const http_request *req)
     char origin[320], msg[700];
     public_origin(req->host, origin, sizeof origin);
     snprintf(msg, sizeof msg,
-             "{\"type\":\"hello\",\"session\":\"%s\",\"url\":\"%s/?s=%s\",\"version\":\"%s\"}",
-             s->code, origin, s->code, EZX_VERSION);
+             "{\"type\":\"hello\",\"session\":\"%s\",\"url\":\"%s/?s=%s\",\"version\":\"%s\","
+             "\"build\":\"%s\"}",
+             s->code, origin, s->code, EZX_VERSION, g_build);
     ws_send_text(c, msg);
 
     conn *peer = session_peer(c);
@@ -639,7 +664,12 @@ static void handle_ws(conn *c)
                 ws_close(c, 1002, "expected continuation");
                 break;
             }
-            if (f.fin) {
+            if (f.fin && f.opcode == WS_OP_TEXT && f.len == sizeof APP_PING - 1 &&
+                memcmp(f.payload, APP_PING, sizeof APP_PING - 1) == 0) {
+                /* the page checking that its connection is alive (browsers can't
+                 * send WebSocket pings themselves); answered here, not relayed */
+                ws_send_text(c, "{\"type\":\"pong\"}");
+            } else if (f.fin) {
                 relay(c, f.opcode, f.payload, (size_t)f.len);
             } else {
                 c->frag_op = f.opcode;
@@ -951,6 +981,7 @@ int server_run(const server_config *cfg)
     g_cfg = cfg;
     if (cfg->web_file && load_template(cfg->web_file) < 0)
         return 1;
+    compute_build_id();
     if (cfg->tls_cert) {
         char err[512];
         if (tls_init(cfg->tls_cert, cfg->tls_key, err, sizeof err) < 0) {

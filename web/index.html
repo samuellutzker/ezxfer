@@ -231,6 +231,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const MAX_INFLIGHT = 16 * 1024 * 1024; // sent but not yet acknowledged
   const ACK_EVERY = 1024 * 1024;
   const HDR = 12;                        // binary header: u32 transfer id, u64 byte offset
+  const BUILD = '{{BUILD}}';             // filled in by the server
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -238,12 +239,28 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   let ws = null, session = null, peerConnected = false, joinUrl = '';
   let intentionalClose = false, reconnectDelay = 800;
-  let nextId = 1;
-  // Identifies this page to the server and the other device. A device that
+  const randomHex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => b.toString(16).padStart(2, '0')).join('');
+  // Transfer ids start at a random point so a reloaded page never reuses ids
+  // the other device still remembers from before the reload.
+  let nextId = 1 + crypto.getRandomValues(new Uint32Array(1))[0] % 1000000000;
+  // Identifies this tab to the server and the other device. A device that
   // reconnects with the same id gets its session slot back and transfers resume.
-  const clientId = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
+  // Kept in sessionStorage so it survives the tab being reloaded, which phones
+  // do to background tabs (e.g. while the file picker is open).
+  const clientId = (() => {
+    const fresh = randomHex(12);
+    try {
+      const kept = sessionStorage.getItem('ezxfer-client');
+      if (kept && /^[0-9a-f]{24}$/.test(kept)) return kept;
+      sessionStorage.setItem('ezxfer-client', fresh);
+    } catch (_) {}
+    return fresh;
+  })();
+  const instanceId = randomHex(8); // this page load; tells the other side when we reloaded
   let peerId = '';            // the other device's client id
+  let peerInstance = '';      // ...and its page load
   let resumes = 0;            // transfers continued after a reconnect (exposed for tests)
+  let connections = 0;        // WebSocket connections opened (exposed for tests)
   const outgoing = new Map(); // id -> transfer we send
   const incoming = new Map(); // "peerId:id" -> transfer we receive (ids are only unique per sender page)
   const inKey = (id) => peerId + ':' + (id >>> 0);
@@ -291,22 +308,32 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const sock = new WebSocket(proto + '//' + location.host + '/ws?c=' + clientId + (code ? '&s=' + encodeURIComponent(code) : ''));
     sock.binaryType = 'arraybuffer';
     ws = sock;
+    connections++;
     setPill('wait', code ? 'Joining…' : 'Connecting…');
     sock.onmessage = (e) => {
       if (sock !== ws) return;
+      lastRx = performance.now();
       if (typeof e.data === 'string') {
         let msg; try { msg = JSON.parse(e.data); } catch (_) { return; }
         onMessage(msg);
       } else onBinary(e.data);
     };
     sock.onopen = () => { reconnectDelay = 800; };
-    sock.onclose = () => socketLost(sock);
+    sock.onclose = (e) => socketLost(sock, e.code);
   }
 
   // Our connection dropped: keep transfers paused and rejoin the same session.
-  function socketLost(sock) {
+  function socketLost(sock, code) {
     if (sock !== ws) return;
     setPeer(false);
+    if (code === 4001) {
+      // the server handed our slot to a connection with the same id: this tab was duplicated
+      intentionalClose = true;
+      failActive('Opened in another tab');
+      setPill('off', 'Opened in another tab');
+      toast('This session is now open in another tab', true);
+      return;
+    }
     if (intentionalClose) { failActive('Disconnected'); return; }
     pauseActive();
     setPill('off', 'Reconnecting…');
@@ -314,8 +341,37 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     reconnectDelay = Math.min(reconnectDelay * 2, 8000);
   }
 
+  // ---------- liveness ----------
+  // A socket can look open long after the network behind it is gone: phones
+  // suspend background tabs, e.g. while the file picker is open. A quick round
+  // trip to the server tells; dead connections are replaced straight away.
+  let lastRx = 0, aliveCheck = null;
+  // `fresh`: replace a check already in progress, whose answer may predate the
+  // connection dying (used when coming back to the page).
+  function checkAlive(timeoutMs, fresh) {
+    const sock = ws;
+    if (!sock || sock.readyState !== 1 || (aliveCheck && !fresh)) return;
+    clearTimeout(aliveCheck);
+    const asked = performance.now();
+    send({ type: 'ping' });  // answered by the server itself
+    aliveCheck = setTimeout(() => {
+      aliveCheck = null;
+      if (ws !== sock || lastRx >= asked) return;  // something arrived: alive
+      sock.onmessage = null; sock.onclose = null;
+      try { sock.close(); } catch (_) {}
+      reconnectDelay = 200;
+      socketLost(sock);
+    }, timeoutMs);
+  }
+  function wakeUp() {  // back on the page: make sure the connection still works
+    if (intentionalClose || document.hidden) return;
+    if (!ws || ws.readyState > 1) { reconnectDelay = 800; connect(session); } else checkAlive(3000, true);
+  }
+  setInterval(() => { if (!document.hidden && performance.now() - lastRx > 15000) checkAlive(10000); }, 5000);
+
   function leave(newCode) {
     intentionalClose = true;
+    peerId = ''; peerInstance = '';
     const old = ws; ws = null;
     if (old) old.close();
     setPeer(false);
@@ -326,6 +382,20 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function onMessage(m) {
     switch (m.type) {
       case 'hello':
+        if (m.build && m.build !== BUILD && !BUILD.startsWith('{{')) {
+          // The server was updated while this page stayed open (it reconnected on its
+          // own). Load the current page so both devices speak the same protocol;
+          // the session code in the URL brings us straight back.
+          let tried = '';
+          try { tried = sessionStorage.getItem('ezxfer-reload-for') || ''; sessionStorage.setItem('ezxfer-reload-for', m.build); } catch (_) {}
+          if (tried !== m.build) {
+            intentionalClose = true;
+            history.replaceState(null, '', '?s=' + m.session);
+            location.reload();
+            return;
+          }
+          toast('This page is out of date — please reload it', true);  // reloading didn't help (e.g. a cache)
+        }
         session = m.session; joinUrl = m.url;
         $('code').textContent = session; $('code2').textContent = session;
         $('link').textContent = joinUrl;
@@ -338,9 +408,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         if (m.connected) {
           const id = String(m.id || '');
           const same = id !== '' && id === peerId;
-          if (!same) { failActive('The other device left'); peerId = id; }
+          if (!same) { failActive('The other device left'); peerId = id; peerInstance = ''; }
           setPeer(true);
-          send({ type: 'info', name: deviceName() });
+          send({ type: 'info', name: deviceName(), instance: instanceId });
           if (same) { resumeWithPeer(); toast('Device reconnected'); } else toast('Device connected');
         } else {
           setPeer(false);
@@ -352,12 +422,20 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         // Unknown, expired or full session: start a fresh one instead
         intentionalClose = true;
         failActive('Session ended');
+        peerId = ''; peerInstance = '';
         toast(m.message || 'Error', true);
         session = null;
         history.replaceState(null, '', location.pathname);
         setTimeout(() => connect(null), 100);
         break;
-      case 'info': $('peerName').textContent = String(m.name || 'Device').slice(0, 40); break;
+      case 'info':
+        $('peerName').textContent = String(m.name || 'Device').slice(0, 40);
+        if (m.instance) {
+          if (peerInstance && m.instance !== peerInstance) peerReloaded();
+          peerInstance = String(m.instance);
+        }
+        break;
+      case 'pong': break;
       case 'offer': addIncoming(m); break;
       case 'accept': onAccepted(m); break;
       case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') { t.state = 'declined'; renderOut(t); } break; }
@@ -374,6 +452,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (on) setPill('on', 'Connected');
     else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
     if (!on) $('peerName').textContent = 'Device';
+    for (const t of outgoing.values()) if (t.state === 'offered') renderOut(t);
   }
 
   function failActive(reason) {
@@ -391,6 +470,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     for (const t of incoming.values())
       if (t.state === 'receiving') { t.paused = true; renderIn(t); }
     sendQueue.length = 0;
+  }
+
+  // The other device's page was reloaded: it kept its place in the session but
+  // lost its files and partial downloads, so transfers with it can't continue.
+  function peerReloaded() {
+    for (const t of outgoing.values())
+      if (t.state === 'sending' || t.state === 'finishing') { t.state = 'failed'; t.paused = false; t.error = 'The other device reloaded the page'; renderOut(t); }
+    for (const t of incoming.values())
+      if (t.peer === peerId && ['offered', 'saving', 'receiving'].includes(t.state)) {
+        abortWriter(t); t.state = 'failed'; t.paused = false; t.error = 'The other device reloaded the page'; renderIn(t);
+      }
   }
 
   // The same device is back. Messages may have been lost in the gap, so each side
@@ -416,7 +506,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   // ---------- sending ----------
   function offerFiles(files) {
-    if (!peerConnected) { toast('Connect a device first', true); return; }
+    if (!files.length) return;
+    if (!peerConnected && !peerId) { toast('Connect a device first', true); return; }
+    // Picked while the connection is briefly down (phones often drop it while
+    // the file picker is open): offered as soon as the other device is back.
+    if (!peerConnected) toast('Reconnecting — the files will be offered when the other device is back');
     for (const file of files) {
       const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0, base: 0, gen: 0, paused: false };
       outgoing.set(t.id, t);
@@ -429,7 +523,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   // "accept" starts a transfer, or continues it from `offset` after a reconnect.
   function onAccepted(m) {
     const t = outgoing.get(m.id);
-    if (!t || !['offered', 'sending', 'finishing'].includes(t.state)) return;
+    if (!t || t.state === 'cancelled' || t.state === 'failed') {
+      // unknown here (e.g. we reloaded) or over: don't leave the receiver waiting
+      send({ type: 'cancel', id: m.id, from: 'sender' });
+      return;
+    }
+    if (!['offered', 'sending', 'finishing'].includes(t.state)) return;
     const offset = Math.max(0, Math.min(t.size, Math.floor(+m.offset || 0)));
     t.gen++;                       // invalidates any chunk read for the old position
     t.sent = t.acked = t.base = offset;
@@ -759,7 +858,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     t.ui.fill.style.width = pct + '%';
     const size = fmtSize(t.size);
     switch (t.state) {
-      case 'offered': setStatus(t, ['Waiting for the other device to accept', size]); break;
+      case 'offered': setStatus(t, [peerConnected ? 'Waiting for the other device to accept' : 'Waiting for the other device to reconnect', size]); break;
       case 'sending': case 'finishing':
         if (t.paused) setStatus(t, ['Paused – waiting for the other device', Math.floor(pct) + '%', fmtSize(t.acked) + ' of ' + size], 'st-warn');
         else setStatus(t, [Math.floor(pct) + '%', fmtSize(t.acked) + ' of ' + size, speed(t, t.acked)]);
@@ -805,7 +904,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   // ---------- UI wiring ----------
-  $('fileInput').addEventListener('change', (e) => { offerFiles(Array.from(e.target.files || [])); e.target.value = ''; });
+  $('fileInput').addEventListener('change', (e) => { wakeUp(); offerFiles(Array.from(e.target.files || [])); e.target.value = ''; });
   const drop = $('drop');
   ['dragenter', 'dragover'].forEach((ev) => window.addEventListener(ev, (e) => { e.preventDefault(); if (peerConnected) drop.classList.add('over'); }));
   ['dragleave', 'dragend'].forEach((ev) => window.addEventListener(ev, (e) => { if (!e.relatedTarget) drop.classList.remove('over'); }));
@@ -837,16 +936,18 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (busy) { e.preventDefault(); e.returnValue = ''; }
   });
   // Phones suspend sockets in the background; reconnect promptly on return.
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && (!ws || ws.readyState > 1) && !intentionalClose) { reconnectDelay = 800; connect(session); }
-  });
+  document.addEventListener('visibilitychange', wakeUp);
+  window.addEventListener('focus', wakeUp);
+  window.addEventListener('pageshow', wakeUp);
 
   // expose a tiny hook for automated tests
   window.ezxfer = {
     get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; },
-    get resumes() { return resumes; },
+    get resumes() { return resumes; }, get connections() { return connections; },
     transfers: () => [...outgoing.values(), ...incoming.values()].map((t) => ({
       name: t.name, dir: t.file ? 'out' : 'in', state: t.state, paused: !!t.paused, via: t.via, bytes: t.file ? t.acked : t.received })),
+    // Simulates a connection that died silently: the socket stays "open" but nothing arrives.
+    freezeConnection() { if (ws) ws.onmessage = null; },
     // Simulates losing the network: `abandon` drops the socket without closing it, like a
     // phone going out of range, so the server only learns about it when the device returns.
     dropConnection(abandon) {

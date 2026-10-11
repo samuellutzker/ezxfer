@@ -99,7 +99,12 @@ Memory therefore stays bounded however large the file is.
 - The receiver then tells the sender which byte to continue from.
 - Every data chunk carries its byte offset, so chunks left over from before the drop are discarded instead of being written in the wrong place.
 - If both devices drop, the session waits `--session-timeout` seconds (default 120) for them to return.
-- Reloading the page starts over, because the browser can't keep the selected file or the partial download across a reload.
+- Phones often drop the connection while a page is in the background, for example while the file picker is open. To cope with that:
+  - Coming back to the page triggers a quick check with the server, and a connection that died silently is replaced within about 3 seconds. The page also checks every 15 seconds of silence.
+  - Files picked while the connection is down are offered as soon as the other device is back.
+  - The client id is kept per tab (`sessionStorage`). If the phone reloads the tab, the page gets its place in the session back instead of ending up in a new session.
+- Reloading the page still starts its transfers over, because the browser can't keep the selected file or the partial download across a reload. Transfers in progress end with "The other device reloaded the page" instead of waiting forever.
+- When the server is upgraded, pages left open would reconnect and keep running the old code. The server therefore sends a build id, and a page that's older than the server reloads itself once.
 
 The join URL uses the address the page was opened with. If that was `localhost`, the server substitutes the machine's LAN IPv4 address. Use `--url` when running behind a reverse proxy or NAT.
 

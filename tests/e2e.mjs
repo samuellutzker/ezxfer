@@ -46,7 +46,7 @@ function ok(name, extra = '') { passed++; console.log(`  ok  ${name}${extra ? ' 
 function assert(c, msg) { if (!c) throw new Error('assertion failed: ' + msg); }
 
 const port = await new Promise((res) => { const s = net.createServer().listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); });
-const server = spawn(BIN, ['-p', String(port), '--quiet', ...certArgs], { stdio: 'inherit' });
+let server = spawn(BIN, ['-p', String(port), '--quiet', ...certArgs], { stdio: 'inherit' });
 await new Promise((r) => setTimeout(r, 300));
 
 // Talk to the server directly even if an HTTP(S)_PROXY is configured.
@@ -285,6 +285,50 @@ try {
   await row(B, 'outList', 'VID_0001.mp4').locator('.st-done').waitFor();
   fs.unlinkSync(upPath);
   ok('sender drops mid-transfer, reconnects and resumes; bytes identical');
+
+  // ---------- files picked while the connection is down are not lost ----------
+  // (phones often lose the connection while their file picker is open)
+  await B.evaluate(() => window.ezxfer.dropConnection(true));
+  const picked = randomBytes(300000);
+  await B.setInputFiles('#fileInput', { name: 'picked-offline.jpg', mimeType: 'image/jpeg', buffer: picked });
+  await row(A, 'inList', 'picked-offline.jpg').getByRole('button', { name: 'Accept' }).click();
+  await A.waitForFunction(() => window.__saved['picked-offline.jpg']);
+  assert((await A.evaluate(() => window.__saved['picked-offline.jpg'].sha)) === sha(picked), 'offline pick intact');
+  ok('files picked while disconnected are offered once the connection is back');
+
+  // ---------- a connection that died silently is noticed on returning to the page ----------
+  const conns = await B.evaluate(() => window.ezxfer.connections);
+  await B.evaluate(() => window.ezxfer.freezeConnection());  // socket "open", nothing arrives
+  t0 = Date.now();
+  await B.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));  // back on the page
+  await B.waitForFunction((n) => window.ezxfer.connections > n && document.body.classList.contains('connected'), conns,
+    { timeout: 10000 });
+  await A.waitForFunction(() => document.body.classList.contains('connected'));
+  ok('dead connection detected on return and replaced', `${Date.now() - t0} ms`);
+
+  // ---------- the phone reloads the page (as Android does to background tabs) ----------
+  await B.reload();
+  await B.waitForFunction(() => document.body.classList.contains('connected'));
+  assert((await B.evaluate(() => window.ezxfer.session)) === session, 'same session after reload');
+  const afterReload = randomBytes(200000);
+  await B.setInputFiles('#fileInput', { name: 'after-reload.png', mimeType: 'image/png', buffer: afterReload });
+  await row(A, 'inList', 'after-reload.png').getByRole('button', { name: 'Accept' }).click();
+  await A.waitForFunction(() => window.__saved['after-reload.png']);
+  assert((await A.evaluate(() => window.__saved['after-reload.png'].sha)) === sha(afterReload), 'post-reload file intact');
+  ok('reloaded phone keeps its place in the session and can send again');
+
+  // a transfer interrupted by a reload ends cleanly instead of waiting forever
+  const relPath = path.join(OUT, 'interrupted.bin');
+  fs.writeFileSync(relPath, randomBytes(64 * 1024 * 1024));
+  await B.setInputFiles('#fileInput', relPath);
+  await row(A, 'inList', 'interrupted.bin').getByRole('button', { name: 'Accept' }).click();
+  await A.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'interrupted.bin') || {}).bytes > 4e6);
+  await B.reload();
+  await row(A, 'inList', 'interrupted.bin').locator('.st-err').waitFor({ timeout: 15000 });
+  await B.waitForFunction(() => document.body.classList.contains('connected'));
+  fs.unlinkSync(relPath);
+  ok('transfer interrupted by a reload ends with an error, not stuck paused',
+     await row(A, 'inList', 'interrupted.bin').locator('.st-err').textContent());
   await A.screenshot({ path: path.join(OUT, 'desktop-transfers.png') });
   await B.screenshot({ path: path.join(OUT, 'phone-transfers.png'), fullPage: true });
 
@@ -361,6 +405,20 @@ try {
   await E.locator('.toast', { hasText: 'not found' }).waitFor();
   await E.waitForFunction(() => window.ezxfer.session && window.ezxfer.session !== 'NOPE99');
   ok('stale session link falls back to a new session');
+
+  // ---------- server upgraded while a page stays open ----------
+  // An open page reconnects to a restarted server by itself. If the server now
+  // serves a different page, the old one must reload instead of speaking an
+  // outdated protocol to the new one.
+  const tplPath = path.join(OUT, 'index-next.html');
+  fs.writeFileSync(tplPath, fs.readFileSync(path.join(here, '..', 'web', 'index.html'), 'utf8')
+    .replace('</body>', '<!-- next-build-marker --></body>'));
+  server.kill('SIGTERM');
+  await new Promise((r) => server.once('exit', r));
+  server = spawn(BIN, ['-p', String(port), '--quiet', ...certArgs, '--web', tplPath], { stdio: 'inherit' });
+  await C.waitForFunction(() => document.documentElement.innerHTML.includes('next-build-marker'), null, { timeout: 20000 });
+  await C.waitForFunction(() => window.ezxfer && window.ezxfer.session);
+  ok('page left open across a server upgrade reloads itself');
 
   // ---------- server restart: clients reconnect automatically ----------
   // (the old session is gone, so the page creates a new one)

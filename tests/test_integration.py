@@ -245,7 +245,7 @@ def http_index(srv):
     st, h, body = get(srv.port, "/")
     assert st == 200 and h["content-type"].startswith("text/html")
     assert int(h["content-length"]) == len(body)
-    assert b"<title>ezxfer</title>" in body and b"{{VERSION}}" not in body and b"v1.0.0" in body
+    assert b"<title>ezxfer</title>" in body and b"{{VERSION}}" not in body and b"v1.1.0" in body
     assert get(srv.port, "/index.html")[0] == 200
 
 
@@ -336,6 +336,24 @@ def ws_fragmented_message(srv):
     assert b.recv() == (0x2, b"abcdefghi")
     a.close()
     b.close()
+
+
+@test
+def ws_app_ping_and_build_id(srv):
+    """Pages check their connection with a text ping the server answers itself."""
+    a, b, _ = pair(srv.port)
+    a.send_text('{"type":"ping"}')
+    assert a.recv_json() == {"type": "pong"}
+    a.send_text('{"type":"ping", "x":1}')  # anything else is relayed as usual
+    assert b.recv() == (0x1, b'{"type":"ping", "x":1}')
+    a.close()
+    b.close()
+    c = WS(srv.port)
+    hello = c.recv_json()
+    c.close()
+    assert re.fullmatch(r"[0-9a-f]{16}", hello["build"]), hello
+    page = get(srv.port, "/")[2]
+    assert f"const BUILD = '{hello['build']}'".encode() in page
 
 
 @test
@@ -630,7 +648,7 @@ def test_options():
     srv = Server("--web", f.name)
     try:
         st, _, body = get(srv.port, "/")
-        assert st == 200 and body == b"<p>custom template 1.0.0 / 1.0.0</p>", body
+        assert st == 200 and body == b"<p>custom template 1.1.0 / 1.1.0</p>", body
     finally:
         srv.stop()
         os.unlink(f.name)
