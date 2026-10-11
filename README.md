@@ -7,7 +7,7 @@ Open the page, scan the QR code, then pick files on either side.
 
 - a small HTTP/1.1 server and a WebSocket (RFC 6455) server, with its own SHA-1 and Base64
 - a QR code encoder (versions 1–40, all error-correction levels) that serves the code as SVG
-- the web app (`web/index.html`), compiled into the binary at build time
+- the web app (`web/index.html`) and its service worker (`web/sw.js`), compiled into the binary at build time
 
 | Desktop | Phone | Dark mode |
 |---|---|---|
@@ -31,7 +31,8 @@ Options:
   -u, --url URL      public base URL encoded in QR codes
                      (default: http://<lan-ip>:<port>)
   -w, --web FILE     serve FILE as the page template instead of the
-                     built-in one ({{VERSION}} is substituted)
+                     built-in one ({{VERSION}} and {{BUILD}} are
+                     substituted)
   -c, --cert FILE    serve HTTPS using this PEM certificate (chain);
                      without it the server speaks plain HTTP
   -k, --key FILE     PEM private key for --cert (default: read the
@@ -44,6 +45,7 @@ Options:
                      terminals that show gaps in the compact one
                      (e.g. macOS Terminal)
   -q, --quiet        no banner or logging
+  -h, --help         show this help
 ```
 
 Builds with gcc or clang on Linux and macOS.
@@ -103,8 +105,30 @@ Memory therefore stays bounded however large the file is.
   - Coming back to the page triggers a quick check with the server, and a connection that died silently is replaced within about 3 seconds. The page also checks every 15 seconds of silence.
   - Files picked while the connection is down are offered as soon as the other device is back.
   - The client id is kept per tab (`sessionStorage`). If the phone reloads the tab, the page gets its place in the session back instead of ending up in a new session.
+- **Choosing files** (on any device): the page tells the other device when its file picker opens and closes, and the other device's status shows **"Choosing files…"**. Phones often lose the connection while the picker is open. During that time a drop is expected, so it isn't reported as a disconnect, and the transfer screen stays up. When the phone is back, everything continues quietly. If it hasn't returned after 2 minutes, it counts as disconnected. A connection lost any other way, for example when the app goes to the background, is reported right away as "Device disconnected".
 - Reloading the page still starts its transfers over, because the browser can't keep the selected file or the partial download across a reload. Transfers in progress end with "The other device reloaded the page" instead of waiting forever.
 - When the server is upgraded, pages left open would reconnect and keep running the old code. The server therefore sends a build id, and a page that's older than the server reloads itself once.
+
+### Protocol
+
+The server only relays messages between the two devices of a session. Apart from the messages below, it doesn't look at their content.
+
+- **From the server:**
+  - `hello {session, url, version, build}`
+  - `peer {connected, id}`
+  - `error {code, message}` (`not_found`, `full`, `busy`)
+  - `pong`, the reply to the page's `ping` liveness check
+- **Between the devices** (JSON text):
+  - `info {name, instance}`
+  - `picking {active}`
+  - `offer {id, name, size, mime}`
+  - `accept {id, offset}`
+  - `decline {id}`
+  - `cancel {id, from}`
+  - `ack {id, bytes}`
+  - `eof {id}`
+  - `done {id}`
+- **File data:** binary messages, each made of a 12-byte header (`u32` transfer id, `u64` byte offset, big-endian) followed by up to 256 KB of the file.
 
 The join URL uses the address the page was opened with. If that was `localhost`, the server substitutes the machine's LAN IPv4 address. Use `--url` when running behind a reverse proxy or NAT.
 
@@ -123,10 +147,12 @@ src/server.c    poll() event loop, HTTP routes, sessions, WebSocket relay
 src/proto.c     HTTP request parser, query decoding, WebSocket framing
 src/tls.c       optional OpenSSL wrapper (stubs when built with TLS=0)
 src/sha1.c      SHA-1 + Base64 (WebSocket handshake)
-web/sw.js       service worker that streams received files into downloads
 src/qr.c        QR code encoder + SVG output
-web/index.html  the frontend (embedded via tools/embed.c, like sw.js)
+web/index.html  the page (HTML, CSS and JavaScript in one file)
+web/sw.js       service worker that streams received files into downloads
+tools/embed.c   turns the web files into C headers at build time
 tests/          unit, QR reference, integration and browser tests
+docs/           screenshots
 ```
 
 ## Tests
@@ -135,7 +161,7 @@ tests/          unit, QR reference, integration and browser tests
 make test-unit          # C unit tests under ASan/UBSan
 make test-qr            # QR output vs. python-qrcode, bit for bit, plus jsQR decoding
 make test-integration   # black-box HTTP/WebSocket tests (Python stdlib only)
-make test-e2e           # two real Chromium pages (desktop + emulated iPhone)
+make test-e2e           # real Chromium pages: desktop, emulated iPhone and Android phone
 make test-integration-tls test-e2e-tls   # the same two suites over HTTPS/WSS
 make test               # all of the above (TLS suites when built with TLS)
 ```
@@ -149,6 +175,8 @@ What is covered:
 - **Integration:**
   - routes and error statuses
   - session create/join/full/not-found, peer leave and rejoin
+  - client ids: a reconnecting device takes back its slot, a different one is refused; empty sessions wait for `--session-timeout`
+  - the server-side `ping`/`pong`, the build id, and Host headers that are ignored when implausible
   - relay of text, binary and fragmented messages; ping/pong; protocol violations
   - a 64 MB transfer with integrity check
   - backpressure: a stalled receiver throttles the sender and server memory stays flat
@@ -162,5 +190,10 @@ What is covered:
   - the page's QR code scans to the join URL, and an emulated iPhone joins with it
   - transfers in both directions, using both save paths, with byte-for-byte checks
   - empty files, several files at once, decline, cancel from either side
+  - streamed downloads to an Android phone through the service worker
+  - resuming after the receiver or the sender loses its connection mid-transfer
+  - "Choosing files…" while the picker is open, versus a real disconnect being reported
+  - files picked while disconnected, a silently dead connection being replaced, a phone reload (with and without a transfer running)
+  - the screen wake lock, and the hint where it's unsupported
   - disconnect and rejoin, joining by typed code, a third device being refused, a stale link
-  - reconnecting after a server restart, and the responsive layout
+  - a page left open across a server upgrade reloading itself, reconnecting after a server restart, and the responsive layout

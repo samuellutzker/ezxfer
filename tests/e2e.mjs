@@ -170,6 +170,7 @@ try {
   await row(B, 'inList', 'holiday-video.mp4').waitFor();
   await row(B, 'inList', 'empty.txt').waitFor();
   assert((await row(A, 'outList', 'holiday-video.mp4').locator('.status').textContent()).includes('Waiting for the other device'), 'sender waits for accept');
+  await B.waitForFunction(() => !document.querySelector('.toast'));  // a clean screenshot for the README
   await B.screenshot({ path: path.join(OUT, 'phone-incoming.png') });
   ok('offers pop up on the peer before any data is sent');
 
@@ -285,6 +286,35 @@ try {
   await row(B, 'outList', 'VID_0001.mp4').locator('.st-done').waitFor();
   fs.unlinkSync(upPath);
   ok('sender drops mid-transfer, reconnects and resumes; bytes identical');
+
+  // ---------- choosing files: a connection drop meanwhile is expected, not reported ----------
+  const [chooser] = await Promise.all([B.waitForEvent('filechooser'), B.click('#drop')]);
+  await A.waitForFunction(() => document.getElementById('pillText').textContent === 'Choosing files…');
+  // Android drops the connection while its picker is open and can't reconnect
+  // until the user is back: go offline, close the socket, wait a while.
+  await phoneCtx.setOffline(true);
+  await B.evaluate(() => window.ezxfer.dropConnection(false));
+  await A.waitForFunction(() => !window.ezxfer.connected);
+  await new Promise((r) => setTimeout(r, 3000));
+  assert(await A.evaluate(() => document.body.classList.contains('connected')), 'stays on the transfer screen');
+  assert((await A.textContent('#pillText')) === 'Choosing files…', 'pill says choosing files');
+  assert((await A.locator('.toast', { hasText: 'disconnected' }).count()) === 0, 'no disconnect message');
+  await phoneCtx.setOffline(false);
+  const chosen = randomBytes(250000);
+  await chooser.setFiles({ name: 'chosen.jpg', mimeType: 'image/jpeg', buffer: chosen });
+  await row(A, 'inList', 'chosen.jpg').getByRole('button', { name: 'Accept' }).click();
+  await A.waitForFunction(() => window.__saved['chosen.jpg']);
+  assert((await A.evaluate(() => window.__saved['chosen.jpg'].sha)) === sha(chosen), 'chosen file intact');
+  assert((await A.textContent('#pillText')) === 'Connected', 'pill back to connected');
+  assert((await A.locator('.toast', { hasText: 'disconnected' }).count()) === 0, 'still no disconnect message');
+  ok('connection lost while choosing files shows "Choosing files…", not a disconnect');
+
+  // ...whereas losing the connection otherwise (e.g. app backgrounded) is reported
+  await B.evaluate(() => window.ezxfer.dropConnection(false));
+  await A.locator('.toast', { hasText: 'Device disconnected' }).waitFor({ timeout: 5000 });
+  await B.waitForFunction(() => document.body.classList.contains('connected'));
+  await A.waitForFunction(() => document.body.classList.contains('connected'));
+  ok('connection lost otherwise is reported as a disconnect');
 
   // ---------- files picked while the connection is down are not lost ----------
   // (phones often lose the connection while their file picker is open)

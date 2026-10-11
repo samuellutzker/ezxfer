@@ -412,16 +412,30 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         if (m.connected) {
           const id = String(m.id || '');
           const same = id !== '' && id === peerId;
+          const wasPicking = same && peerPicking;  // back from its file picker: nothing to report
+          setPeerPicking(false);
           if (!same) { failActive('The other device left'); peerId = id; peerInstance = ''; }
           setPeer(true);
           send({ type: 'info', name: deviceName(), instance: instanceId });
-          if (same) { resumeWithPeer(); toast('Device reconnected'); } else toast('Device connected');
+          if (same) { resumeWithPeer(); if (!wasPicking) toast('Device reconnected'); } else toast('Device connected');
         } else {
-          setPeer(false);
           pauseActive();
-          toast('Device disconnected — waiting for it to come back', true);
+          if (peerPicking) {
+            // Phones usually lose the connection while their file picker is open.
+            // That's not the device going away: keep the transfer screen and wait.
+            peerConnected = false;
+            setPill('wait', 'Choosing files…');
+            pickGrace = setTimeout(() => {
+              setPeerPicking(false); setPeer(false);
+              toast('Device disconnected — waiting for it to come back', true);
+            }, PICK_GRACE);
+          } else {
+            setPeer(false);
+            toast('Device disconnected — waiting for it to come back', true);
+          }
         }
         break;
+      case 'picking': setPeerPicking(!!m.active); break;
       case 'error':
         // Unknown, expired or full session: start a fresh one instead
         intentionalClose = true;
@@ -450,10 +464,21 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     }
   }
 
+  // The other device has its file picker open (it says so when the picker opens
+  // and closes). A connection drop meanwhile is expected and not reported, unless
+  // the device stays away longer than PICK_GRACE.
+  const PICK_GRACE = 120000;
+  let peerPicking = false, pickGrace = null;
+  function setPeerPicking(on) {
+    peerPicking = on;
+    clearTimeout(pickGrace); pickGrace = null;
+    if (peerConnected) setPill('on', on ? 'Choosing files…' : 'Connected');
+  }
+
   function setPeer(on) {
     peerConnected = on;
     document.body.classList.toggle('connected', on);
-    if (on) setPill('on', 'Connected');
+    if (on) setPill('on', peerPicking ? 'Choosing files…' : 'Connected');
     else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
     if (!on) $('peerName').textContent = 'Device';
     for (const t of outgoing.values()) if (t.state === 'offered') render(t);
@@ -873,7 +898,23 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   // ---------- UI wiring ----------
-  $('fileInput').addEventListener('change', (e) => { wakeUp(); offerFiles(Array.from(e.target.files || [])); e.target.value = ''; });
+  // Tell the other device while our file picker is open (see setPeerPicking).
+  let picking = false, pickerAway = false;
+  function setPicking(on) {
+    if (picking === on) return;
+    picking = on; pickerAway = false;
+    send({ type: 'picking', active: on });
+  }
+  $('fileInput').addEventListener('click', () => setPicking(true));
+  $('fileInput').addEventListener('cancel', () => setPicking(false));
+  $('fileInput').addEventListener('change', (e) => { setPicking(false); wakeUp(); offerFiles(Array.from(e.target.files || [])); e.target.value = ''; });
+  // Browsers without the "cancel" event: the picker takes focus away (or hides
+  // the page) and gives it back when closed, possibly without "change".
+  const pickerLeft = () => { if (picking) pickerAway = true; };
+  const pickerBack = () => { if (picking && pickerAway && !document.hidden) setTimeout(() => setPicking(false), 1000); };
+  window.addEventListener('blur', pickerLeft);
+  window.addEventListener('focus', pickerBack);
+  document.addEventListener('visibilitychange', () => (document.hidden ? pickerLeft() : pickerBack()));
   const drop = $('drop');
   ['dragenter', 'dragover'].forEach((ev) => window.addEventListener(ev, (e) => { e.preventDefault(); if (peerConnected) drop.classList.add('over'); }));
   ['dragleave', 'dragend'].forEach((ev) => window.addEventListener(ev, (e) => { if (!e.relatedTarget) drop.classList.remove('over'); }));
