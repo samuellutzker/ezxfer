@@ -72,12 +72,28 @@ const mockSavePicker = () => {
   });
 };
 
+// Records Screen Wake Lock requests/releases.
+const mockWakeLock = () => {
+  window.__wake = { log: [], held: false };
+  Object.defineProperty(Navigator.prototype, 'wakeLock', { configurable: true, value: {
+    request: async (type) => {
+      const listeners = [];
+      window.__wake.log.push('request:' + type); window.__wake.held = true;
+      return {
+        addEventListener: (ev, fn) => listeners.push(fn),
+        release: async () => { window.__wake.log.push('release'); window.__wake.held = false; listeners.forEach((f) => f()); },
+      };
+    },
+  } });
+};
+
 const row = (page, list, name) => page.locator(`#${list} .item`, { has: page.locator('.name', { hasText: name }) });
 
 try {
   // ---------- desktop page creates a session and shows a QR code ----------
   const desk = await browser.newContext({ viewport: { width: 1280, height: 860 }, ignoreHTTPSErrors: true });
   await desk.addInitScript(mockSavePicker);
+  await desk.addInitScript(mockWakeLock);
   const A = await desk.newPage(); watch(A, 'desktop');
   await A.goto(`${SCHEME}://127.0.0.1:${port}/`);
   await A.waitForFunction(() => window.ezxfer && window.ezxfer.session);
@@ -120,6 +136,8 @@ try {
   const phoneCtx = await browser.newContext({ ...devices['iPhone 13'], acceptDownloads: true, ignoreHTTPSErrors: true });
   // Safari on iOS has no File System Access API (Chromium would expose it over HTTPS)
   await phoneCtx.addInitScript(() => { delete window.showSaveFilePicker; });
+  // ...and older iOS versions have no Screen Wake Lock API
+  await phoneCtx.addInitScript(() => { delete Navigator.prototype.wakeLock; });
   const B = await phoneCtx.newPage(); watch(B, 'phone');
   await B.goto(scanned);
   await A.waitForFunction(() => document.body.classList.contains('connected'));
@@ -157,6 +175,14 @@ try {
   await row(A, 'outList', 'holiday-video.mp4').locator('.st-done').waitFor();
   await row(B, 'inList', 'holiday-video.mp4').locator('.st-done').waitFor();
   ok('desktop -> phone 9 MB transfer (download fallback), bytes identical', `${Date.now() - t0} ms`);
+
+  // the sender held a screen wake lock while sending and let it go afterwards
+  await A.waitForFunction(() => !window.__wake.held);
+  const wake = await A.evaluate(() => window.__wake.log);
+  assert(wake[0] === 'request:screen' && wake.includes('release'), 'wake lock log: ' + wake.join(','));
+  // the phone (no wake lock API) is told to keep its screen on instead
+  await B.locator('.toast', { hasText: 'Keep this screen on' }).waitFor();
+  ok('screen wake lock held during the transfer (hint shown where unsupported)', wake.join(' → '));
 
   const [dl0] = await Promise.all([B.waitForEvent('download'), row(B, 'inList', 'empty.txt').getByRole('button', { name: 'Accept' }).click()]);
   assert(fs.readFileSync(await dl0.path()).length === 0, 'empty file');

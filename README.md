@@ -90,6 +90,7 @@ The join URL uses the address the page was opened with. If that was `localhost`,
 
 - By default traffic is plain HTTP; use `--cert`/`--key` to encrypt it (see above). Behind a TLS reverse proxy such as Caddy or nginx, run ezxfer without a certificate and pass `--url https://…`.
 - Anyone who knows a session's code can join it while it has a free slot. Codes are random (32⁶ ≈ 10⁹ combinations), and a session is full once two devices are connected.
+- While a transfer is running, the page keeps the screen on with the Screen Wake Lock API, because phones drop network connections when the screen locks. Browsers only offer this on HTTPS (or `localhost`); elsewhere, phones show a hint to keep the screen on.
 - Without the File System Access API, the receiving browser holds the whole file in memory until the transfer completes. That is fine for photos and videos, but very large files (several GB) on a phone may hit browser limits.
 
 ## Layout

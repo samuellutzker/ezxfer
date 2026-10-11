@@ -531,6 +531,39 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     }
   }
 
+  // ---------- screen wake lock ----------
+  // Phones drop connections when the screen locks, so keep it on while bytes move.
+  let wakeLock = null, wakePending = false, wakeFailed = false, wakeHinted = false;
+  function transfersBusy() {
+    for (const t of outgoing.values()) if (t.state === 'sending' || t.state === 'finishing') return true;
+    for (const t of incoming.values()) if (t.state === 'receiving') return true;
+    return false;
+  }
+  async function updateWakeLock() {
+    const busy = transfersBusy();
+    if (!('wakeLock' in navigator)) {
+      if (busy && !wakeHinted && navigator.maxTouchPoints > 0) { wakeHinted = true; toast('Keep this screen on until the transfer finishes'); }
+      return;
+    }
+    if (busy && !wakeLock && !wakePending && !wakeFailed && document.visibilityState === 'visible') {
+      wakePending = true;
+      try {
+        const lock = await navigator.wakeLock.request('screen');
+        lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
+        wakeLock = lock;
+      } catch (_) { wakeFailed = true; }  // e.g. battery saver; retried after the page is shown again
+      wakePending = false;
+      if (!transfersBusy()) updateWakeLock();
+    } else if (!busy && wakeLock) {
+      const lock = wakeLock; wakeLock = null;
+      lock.release().catch(() => {});
+    }
+  }
+  document.addEventListener('visibilitychange', () => {
+    // the browser releases the lock when the page is hidden; take it again on return
+    if (document.visibilityState === 'visible') { wakeFailed = false; updateWakeLock(); }
+  });
+
   // ---------- rendering ----------
   function createRow(t, isIn) {
     const list = $(isIn ? 'inList' : 'outList');
@@ -571,7 +604,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   let renderPending = new Set(), rafScheduled = false;
   function schedule(t, fn) {
     renderPending.add(() => fn(t));
-    if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(() => { rafScheduled = false; const p = renderPending; renderPending = new Set(); p.forEach((f) => f()); updateAcceptAll(); }); }
+    if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(() => { rafScheduled = false; const p = renderPending; renderPending = new Set(); p.forEach((f) => f()); updateAcceptAll(); updateWakeLock(); }); }
   }
   const renderOut = (t) => schedule(t, drawOut);
   const renderIn = (t) => schedule(t, drawIn);
