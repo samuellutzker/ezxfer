@@ -2,6 +2,7 @@
 #include "server.h"
 #include "proto.h"
 #include "qr.h"
+#include "tls.h"
 #include "index_html.h"
 
 #include <arpa/inet.h>
@@ -47,8 +48,15 @@ typedef struct {
 
 struct session;
 
+/* TLS connection states (plain-HTTP servers use TS_PLAIN throughout) */
+enum { TS_PLAIN, TS_DETECT, TS_HANDSHAKE, TS_READY };
+
 typedef struct conn {
     int fd;
+    int tls_state;
+    int tls_want;       /* poll events the TLS handshake is waiting for */
+    int redirect_https; /* plain HTTP on a TLS port: answer with a redirect */
+    tls_conn *tls;
     int is_ws;
     int closing; /* close once the output buffer has been flushed */
     buffer in, out, frag;
@@ -68,6 +76,7 @@ static const server_config *g_cfg;
 static conn *g_conns[MAX_CONNS];
 static session *g_sessions[MAX_SESSIONS];
 static volatile sig_atomic_t g_stop;
+static int g_tls; /* serving HTTPS */
 
 static void logf_(const char *fmt, ...)
 {
@@ -206,9 +215,9 @@ static void public_origin(const char *host_header, char *out, size_t outsz)
             snprintf(ip, sizeof ip, "%s", g_cfg->bind_addr);
         else
             lan_address(ip, sizeof ip);
-        snprintf(out, outsz, "http://%s:%d", ip, g_cfg->port);
+        snprintf(out, outsz, "%s://%s:%d", g_tls ? "https" : "http", ip, g_cfg->port);
     } else {
-        snprintf(out, outsz, "http://%s", host_header);
+        snprintf(out, outsz, "%s://%s", g_tls ? "https" : "http", host_header);
     }
 }
 
@@ -337,6 +346,7 @@ static void conn_free(conn *c)
             session_destroy(s);
         }
     }
+    tls_free(c->tls);
     close(c->fd);
     buf_free(&c->in);
     buf_free(&c->out);
@@ -499,6 +509,17 @@ static void handle_http(conn *c)
     c->in.len -= (size_t)hl;
 
     int is_get = strcmp(req.method, "GET") == 0, is_head = strcmp(req.method, "HEAD") == 0;
+    if (c->redirect_https) {
+        char origin[320], loc[2000];
+        if (req.host[0])
+            snprintf(origin, sizeof origin, "https://%s", req.host);
+        else
+            public_origin("", origin, sizeof origin);
+        snprintf(loc, sizeof loc, "Location: %s%s%s%s\r\n", origin, req.path,
+                 req.query[0] ? "?" : "", req.query);
+        http_respond(c, 301, "Moved Permanently", "text/plain", "Use HTTPS\n", 10, loc);
+        return;
+    }
     if (!is_get && !is_head) {
         http_error(c, 405, "Method Not Allowed");
         return;
@@ -594,17 +615,74 @@ static void handle_ws(conn *c)
 
 /* ---------------- socket I/O ---------------- */
 
+/* > 0 bytes, 0 = would block, -1 = closed or failed */
+static long io_read(conn *c, void *buf, size_t n)
+{
+    if (c->tls)
+        return tls_read(c->tls, buf, n);
+    ssize_t r = recv(c->fd, buf, n, 0);
+    if (r > 0)
+        return r;
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+        return 0;
+    return -1;
+}
+
+static long io_write(conn *c, const void *buf, size_t n)
+{
+    if (c->tls)
+        return tls_write(c->tls, buf, n);
+    ssize_t w = send(c->fd, buf, n, MSG_NOSIGNAL);
+    if (w >= 0)
+        return w;
+    return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) ? 0 : -1;
+}
+
+/* Advances a TLS connection that is still being set up. Returns -1 to drop,
+ * 0 while waiting, 1 once application data can flow. */
+static int tls_progress(conn *c)
+{
+    if (c->tls_state == TS_DETECT) {
+        /* A TLS ClientHello starts with 0x16; anything else is plain HTTP. */
+        uint8_t b;
+        ssize_t r = recv(c->fd, &b, 1, MSG_PEEK);
+        if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+            return -1;
+        if (r < 0)
+            return 0;
+        if (b != 0x16) {
+            c->tls_state = TS_PLAIN;
+            c->redirect_https = 1;
+            return 1;
+        }
+        c->tls = tls_new(c->fd);
+        if (!c->tls)
+            return -1;
+        c->tls_state = TS_HANDSHAKE;
+    }
+    if (c->tls_state == TS_HANDSHAKE) {
+        int want = TLS_WANT_READ;
+        int r = tls_handshake(c->tls, &want);
+        if (r < 0)
+            return -1;
+        if (r == 0) {
+            c->tls_want = want;
+            return 0;
+        }
+        c->tls_state = TS_READY;
+    }
+    return 1;
+}
+
 /* Returns -1 if the connection should be dropped. */
 static int conn_read(conn *c)
 {
     for (int iter = 0; iter < 4; iter++) {
         if (buf_reserve(&c->in, READ_CHUNK) < 0)
             return -1;
-        ssize_t r = recv(c->fd, c->in.d + c->in.len, READ_CHUNK, 0);
-        if (r == 0)
-            return -1;
-        if (r < 0)
-            return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) ? 0 : -1;
+        long r = io_read(c, c->in.d + c->in.len, READ_CHUNK);
+        if (r <= 0)
+            return r;
         c->in.len += (size_t)r;
         if (!c->is_ws)
             handle_http(c);
@@ -615,7 +693,7 @@ static int conn_read(conn *c)
         /* honour back-pressure: stop reading once the peer is saturated */
         if (out_pending(session_peer(c)) > OUT_HIGH_WATER)
             return 0;
-        if ((size_t)r < READ_CHUNK)
+        if ((size_t)r < READ_CHUNK && !tls_pending(c->tls))
             return 0;
     }
     return 0;
@@ -624,9 +702,9 @@ static int conn_read(conn *c)
 static int conn_flush(conn *c)
 {
     while (out_pending(c) > 0) {
-        ssize_t w = send(c->fd, c->out.d + c->out.off, out_pending(c), MSG_NOSIGNAL);
-        if (w < 0)
-            return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) ? 0 : -1;
+        long w = io_write(c, c->out.d + c->out.off, out_pending(c));
+        if (w <= 0)
+            return (int)w;
         c->out.off += (size_t)w;
     }
     c->out.len = c->out.off = 0;
@@ -661,6 +739,7 @@ static void accept_new(int lfd)
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         c->fd = fd;
+        c->tls_state = g_tls ? TS_DETECT : TS_PLAIN;
         c->created = c->last_rx = time(NULL);
         if (sa.ss_family == AF_INET)
             inet_ntop(AF_INET, &((struct sockaddr_in *)&sa)->sin_addr, c->addr, sizeof c->addr);
@@ -733,7 +812,7 @@ static void print_banner(const server_config *cfg)
     char origin[320];
     public_origin("", origin, sizeof origin);
     printf("\n  ezxfer %s - browser file transfer\n\n", EZX_VERSION);
-    printf("  Open on this computer:  http://localhost:%d/\n", cfg->port);
+    printf("  Open on this computer:  %s://localhost:%d/\n", g_tls ? "https" : "http", cfg->port);
     printf("  Open on other devices:  %s/\n\n", origin);
     if (cfg->print_qr) {
         char url[340];
@@ -780,6 +859,14 @@ int server_run(const server_config *cfg)
     g_cfg = cfg;
     if (cfg->web_file && load_template(cfg->web_file) < 0)
         return 1;
+    if (cfg->tls_cert) {
+        char err[512];
+        if (tls_init(cfg->tls_cert, cfg->tls_key, err, sizeof err) < 0) {
+            fprintf(stderr, "%s\n", err);
+            return 1;
+        }
+        g_tls = 1;
+    }
     int lfd = open_listener(cfg);
     if (lfd < 0)
         return 1;
@@ -798,8 +885,9 @@ int server_run(const server_config *cfg)
     static conn *pconn[MAX_CONNS + 1];
     time_t last_hk = time(NULL);
 
+    static uint8_t force_read[MAX_CONNS + 1];
     while (!g_stop) {
-        int n = 0;
+        int n = 0, timeout = 1000;
         pfd[n].fd = lfd;
         pfd[n].events = POLLIN;
         pconn[n++] = NULL;
@@ -808,30 +896,55 @@ int server_run(const server_config *cfg)
             if (!c)
                 continue;
             short ev = 0;
-            if (!c->closing && out_pending(session_peer(c)) <= OUT_HIGH_WATER)
-                ev |= POLLIN;
-            if (out_pending(c) > 0 || c->closing)
-                ev |= POLLOUT;
+            force_read[n] = 0;
+            if (c->tls_state == TS_DETECT) {
+                ev = POLLIN;
+            } else if (c->tls_state == TS_HANDSHAKE) {
+                ev = c->tls_want == TLS_WANT_WRITE ? POLLOUT : POLLIN;
+            } else {
+                if (!c->closing && out_pending(session_peer(c)) <= OUT_HIGH_WATER) {
+                    ev |= POLLIN;
+                    /* decrypted data already inside OpenSSL won't wake poll() */
+                    if (tls_pending(c->tls)) {
+                        force_read[n] = 1;
+                        timeout = 0;
+                    }
+                }
+                if (out_pending(c) > 0 || c->closing)
+                    ev |= POLLOUT;
+            }
             pfd[n].fd = c->fd;
             pfd[n].events = ev;
             pfd[n].revents = 0;
             pconn[n++] = c;
         }
 
-        int r = poll(pfd, (nfds_t)n, 1000);
+        int r = poll(pfd, (nfds_t)n, timeout);
         if (r < 0 && errno != EINTR) {
             perror("poll");
             break;
         }
-        if (r > 0) {
+        if (r >= 0) {
             if (pfd[0].revents & POLLIN)
                 accept_new(lfd);
             for (int i = 1; i < n; i++) {
                 conn *c = pconn[i];
                 short re = pfd[i].revents;
+                if (force_read[i])
+                    re |= POLLIN;
                 if (!re)
                     continue;
                 int drop = 0;
+                if (c->tls_state == TS_DETECT || c->tls_state == TS_HANDSHAKE) {
+                    int st = tls_progress(c);
+                    if (st < 0) {
+                        conn_free(c);
+                        continue;
+                    }
+                    if (st == 0)
+                        continue;
+                    re |= POLLIN; /* the first request may already be buffered */
+                }
                 if (re & POLLIN)
                     drop = conn_read(c) < 0;
                 else if (re & (POLLERR | POLLHUP | POLLNVAL))
@@ -860,6 +973,7 @@ int server_run(const server_config *cfg)
             conn_free(g_conns[i]);
     close(lfd);
     free(g_template);
+    tls_cleanup();
     if (!cfg->quiet)
         fprintf(stderr, "\nbye\n");
     return 0;

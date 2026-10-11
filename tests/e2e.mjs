@@ -1,5 +1,6 @@
 // End-to-end browser tests (Playwright + Chromium).
-// Usage: node tests/e2e.mjs ./ezxfer
+// Usage: node tests/e2e.mjs ./ezxfer [--tls]
+// With --tls the server runs with a self-signed certificate (HTTPS/WSS).
 // Test-only dependencies: playwright, jsqr (cd tests && npm install).
 import { spawn, execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -23,14 +24,24 @@ const { chromium, devices } = pw.mod;
 const jsqr = load('jsqr');
 
 const BIN = path.resolve(process.argv[2] || './ezxfer');
+const TLS = process.argv.includes('--tls');
+const SCHEME = TLS ? 'https' : 'http';
 const OUT = process.env.E2E_OUT || fs.mkdtempSync(path.join(os.tmpdir(), 'ezxfer-e2e-'));
+const certArgs = [];
+if (TLS) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ezxfer-e2e-cert-'));
+  execSync(`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj /CN=ezxfer-e2e ` +
+    `-keyout ${dir}/key.pem -out ${dir}/cert.pem`, { stdio: 'ignore' });
+  certArgs.push('--cert', `${dir}/cert.pem`, '--key', `${dir}/key.pem`);
+}
+console.log(`mode: ${TLS ? 'HTTPS/WSS (self-signed certificate)' : 'plain HTTP/WS'}`);
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 let passed = 0;
 function ok(name, extra = '') { passed++; console.log(`  ok  ${name}${extra ? '  ' + extra : ''}`); }
 function assert(c, msg) { if (!c) throw new Error('assertion failed: ' + msg); }
 
 const port = await new Promise((res) => { const s = net.createServer().listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); });
-const server = spawn(BIN, ['-p', String(port), '--quiet'], { stdio: 'inherit' });
+const server = spawn(BIN, ['-p', String(port), '--quiet', ...certArgs], { stdio: 'inherit' });
 await new Promise((r) => setTimeout(r, 300));
 
 // Talk to the server directly even if an HTTP(S)_PROXY is configured.
@@ -65,10 +76,10 @@ const row = (page, list, name) => page.locator(`#${list} .item`, { has: page.loc
 
 try {
   // ---------- desktop page creates a session and shows a QR code ----------
-  const desk = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const desk = await browser.newContext({ viewport: { width: 1280, height: 860 }, ignoreHTTPSErrors: true });
   await desk.addInitScript(mockSavePicker);
   const A = await desk.newPage(); watch(A, 'desktop');
-  await A.goto(`http://127.0.0.1:${port}/`);
+  await A.goto(`${SCHEME}://127.0.0.1:${port}/`);
   await A.waitForFunction(() => window.ezxfer && window.ezxfer.session);
   const session = await A.evaluate(() => window.ezxfer.session);
   const joinUrl = await A.evaluate(() => window.ezxfer.url);
@@ -76,7 +87,18 @@ try {
   assert((await A.textContent('#code')) === session, 'session code displayed');
   assert((await A.textContent('#pillText')) === 'Waiting for device', 'waiting pill');
   assert(new URL(A.url()).searchParams.get('s') === session, 'URL carries session for reloads');
+  assert(joinUrl.startsWith(SCHEME + '://'), `join URL uses ${SCHEME}: ${joinUrl}`);
+  assert(await A.evaluate(() => window.isSecureContext), 'secure context');
   ok('desktop shows session + QR', `session=${session}`);
+  if (TLS) {
+    // typing the address without https:// lands on the HTTPS page
+    const R = await desk.newPage();
+    await R.goto(`http://127.0.0.1:${port}/`);
+    assert(R.url().startsWith(`https://127.0.0.1:${port}/`), `redirected: ${R.url()}`);
+    await R.waitForFunction(() => window.ezxfer && window.ezxfer.session);
+    await R.close();
+    ok('http:// is redirected to https://');
+  }
 
   // ---------- "scan" the QR code from the rendered image ----------
   let scanned = joinUrl;
@@ -95,7 +117,9 @@ try {
   await A.screenshot({ path: path.join(OUT, 'desktop-waiting.png') });
 
   // ---------- phone joins by opening the scanned URL ----------
-  const phoneCtx = await browser.newContext({ ...devices['iPhone 13'], acceptDownloads: true });
+  const phoneCtx = await browser.newContext({ ...devices['iPhone 13'], acceptDownloads: true, ignoreHTTPSErrors: true });
+  // Safari on iOS has no File System Access API (Chromium would expose it over HTTPS)
+  await phoneCtx.addInitScript(() => { delete window.showSaveFilePicker; });
   const B = await phoneCtx.newPage(); watch(B, 'phone');
   await B.goto(scanned);
   await A.waitForFunction(() => document.body.classList.contains('connected'));
@@ -208,9 +232,9 @@ try {
   await A.waitForFunction(() => !document.body.classList.contains('connected'));
 
   // ---------- another computer joins by typing the code ----------
-  const other = await browser.newContext({ viewport: { width: 1000, height: 800 } });
+  const other = await browser.newContext({ viewport: { width: 1000, height: 800 }, ignoreHTTPSErrors: true });
   const C = await other.newPage(); watch(C, 'computer2');
-  await C.goto(`http://127.0.0.1:${port}/`);
+  await C.goto(`${SCHEME}://127.0.0.1:${port}/`);
   await C.waitForFunction(() => window.ezxfer.session);
   assert((await C.evaluate(() => window.ezxfer.session)) !== session, 'C got its own session');
   await C.fill('#joinCode', session.toLowerCase());
@@ -226,15 +250,15 @@ try {
   ok('second computer joins by typing the session code and transfers');
 
   // ---------- a third device is refused, gets its own session ----------
-  const D = await (await browser.newContext()).newPage(); watch(D, 'third');
-  await D.goto(`http://127.0.0.1:${port}/?s=${session}`);
+  const D = await (await browser.newContext({ ignoreHTTPSErrors: true })).newPage(); watch(D, 'third');
+  await D.goto(`${SCHEME}://127.0.0.1:${port}/?s=${session}`);
   await D.locator('.toast', { hasText: 'already has two devices' }).waitFor();
   await D.waitForFunction((s) => window.ezxfer.session && window.ezxfer.session !== s, session);
   ok('third device is told the session is full and gets a new one');
 
   // ---------- unknown code falls back to a fresh session ----------
-  const E = await (await browser.newContext()).newPage(); watch(E, 'stale');
-  await E.goto(`http://127.0.0.1:${port}/?s=NOPE99`);
+  const E = await (await browser.newContext({ ignoreHTTPSErrors: true })).newPage(); watch(E, 'stale');
+  await E.goto(`${SCHEME}://127.0.0.1:${port}/?s=NOPE99`);
   await E.locator('.toast', { hasText: 'not found' }).waitFor();
   await E.waitForFunction(() => window.ezxfer.session && window.ezxfer.session !== 'NOPE99');
   ok('stale session link falls back to a new session');
@@ -244,7 +268,7 @@ try {
   server.kill('SIGTERM');
   await new Promise((r) => server.once('exit', r));
   await A.waitForFunction(() => document.getElementById('pillText').textContent === 'Reconnecting…');
-  const server2 = spawn(BIN, ['-p', String(port), '--quiet'], { stdio: 'inherit' });
+  const server2 = spawn(BIN, ['-p', String(port), '--quiet', ...certArgs], { stdio: 'inherit' });
   try {
     await A.waitForFunction((s) => window.ezxfer.session && window.ezxfer.session !== s &&
       document.getElementById('pillText').textContent === 'Waiting for device', session, { timeout: 20000 });

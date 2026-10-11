@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Black-box integration tests for the ezxfer server (Python stdlib only).
 
-Usage: python3 tests/test_integration.py ./ezxfer
+Usage: python3 tests/test_integration.py ./ezxfer [--tls]
+
+With --tls every test runs over HTTPS/WSS against a freshly generated
+self-signed certificate (verified by the client), plus TLS-specific tests.
 """
 import base64
 import hashlib
 import json
 import os
+import shutil
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -16,7 +21,31 @@ import threading
 import time
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./ezxfer")
+TLS = "--tls" in sys.argv[2:]
+SCHEME = "https" if TLS else "http"
+CERT_DIR = tempfile.mkdtemp(prefix="ezxfer-cert-")
+CERT, KEY = os.path.join(CERT_DIR, "cert.pem"), os.path.join(CERT_DIR, "key.pem")
 PASSED = []
+
+
+def make_cert(cert, key, cn="ezxfer-test"):
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                    "-nodes", "-days", "2", "-subj", f"/CN={cn}",
+                    "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
+                    "-keyout", key, "-out", cert], check=True, capture_output=True)
+
+
+def cert_args():
+    return ["--cert", CERT, "--key", KEY] if TLS else []
+
+
+def connect(port, timeout=5, tls=None):
+    """TCP connection to the server, wrapped in verified TLS in --tls mode."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    if TLS if tls is None else tls:
+        ctx = ssl.create_default_context(cafile=CERT)
+        s = ctx.wrap_socket(s, server_hostname="127.0.0.1")
+    return s
 
 
 def free_port():
@@ -30,7 +59,7 @@ def free_port():
 class Server:
     def __init__(self, *args):
         self.port = free_port()
-        self.proc = subprocess.Popen([BIN, "-p", str(self.port), "--quiet", *args])
+        self.proc = subprocess.Popen([BIN, "-p", str(self.port), "--quiet", *cert_args(), *args])
         deadline = time.time() + 5
         while time.time() < deadline:
             try:
@@ -56,14 +85,14 @@ class Server:
             raise
 
 
-def http(port, raw: bytes, timeout=5):
-    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+def http(port, raw: bytes, timeout=5, tls=None):
+    s = connect(port, timeout, tls)
     s.sendall(raw)
     data = b""
     while True:
         try:
             chunk = s.recv(65536)
-        except ConnectionResetError:
+        except (ConnectionResetError, ssl.SSLError):
             break
         if not chunk:
             break
@@ -84,7 +113,7 @@ class WS:
     """Minimal RFC 6455 client."""
 
     def __init__(self, port, path="/ws", host=None, timeout=10):
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        self.sock = connect(port, timeout)
         key = base64.b64encode(os.urandom(16)).decode()
         host = host or f"127.0.0.1:{port}"
         self.sock.sendall(
@@ -252,7 +281,7 @@ def http_errors(srv):
 @test
 def http_split_request(srv):
     """A request arriving in small pieces is still parsed."""
-    s = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    s = connect(srv.port)
     for piece in [b"GE", b"T /hea", b"lth HTTP/1.1\r\n", b"Host: x\r\n", b"\r\n"]:
         s.sendall(piece)
         time.sleep(0.05)
@@ -269,11 +298,11 @@ def ws_hello_url(srv):
     a = WS(srv.port)
     h = a.recv_json()
     # localhost Host header -> URL uses a LAN address and the server port
-    assert h["url"].startswith("http://") and h["url"].endswith(f":{srv.port}/?s={h['session']}"), h
+    assert h["url"].startswith(SCHEME + "://") and h["url"].endswith(f":{srv.port}/?s={h['session']}"), h
     a.close()
     # A non-local Host header is kept as-is (e.g. reached via LAN IP or hostname)
     b = WS(srv.port, host="my-pc.lan:1234")
-    assert b.recv_json()["url"].startswith("http://my-pc.lan:1234/?s=")
+    assert b.recv_json()["url"].startswith(SCHEME + "://my-pc.lan:1234/?s=")
     b.close()
 
 
@@ -470,7 +499,7 @@ def ws_pipelined_frames_after_handshake(srv):
     """Frames sent in the same packet as the handshake are not lost."""
     a = WS(srv.port)
     code = a.recv_json()["session"]
-    s = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    s = connect(srv.port)
     key = base64.b64encode(os.urandom(16)).decode()
     s.sendall((f"GET /ws?s={code} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode()
@@ -479,6 +508,50 @@ def ws_pipelined_frames_after_handshake(srv):
     assert a.recv() == (0x1, b"early bird")
     s.close()
     a.close()
+
+
+# ---------------------------------------------------------------- TLS only
+
+@test
+def tls_plain_http_is_redirected(srv):
+    st, h, body = http(srv.port, b"GET /some/path?s=ABC HTTP/1.1\r\nHost: my-pc.lan:8443\r\n\r\n", tls=False)
+    assert st == 301 and h["location"] == "https://my-pc.lan:8443/some/path?s=ABC", (st, h)
+
+
+@test
+def tls_handshake_details(srv):
+    s = connect(srv.port)
+    assert s.version() in ("TLSv1.2", "TLSv1.3"), s.version()
+    s.close()
+    # a client that doesn't trust the certificate fails, and the server carries on
+    raw = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    try:
+        ssl.create_default_context().wrap_socket(raw, server_hostname="127.0.0.1")
+        raise AssertionError("untrusted certificate was accepted")
+    except ssl.SSLCertVerificationError:
+        pass
+    assert get(srv.port, "/health")[2] == b"ok\n"
+
+
+@test
+def tls_garbage_and_abandoned_handshakes(srv):
+    bad = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    bad.sendall(b"\x16\x03\x01\x00\x05hello-not-a-client-hello")
+    # the server may send a TLS alert first, but must close the connection
+    while True:
+        try:
+            if not bad.recv(4096):
+                break
+        except ConnectionResetError:
+            break
+    stalled = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    stalled.sendall(b"\x16")  # starts a handshake and never finishes it
+    # neither blocks the server
+    a, b, _ = pair(srv.port)
+    a.send_text("still serving")
+    assert b.recv() == (0x1, b"still serving")
+    for x in (bad, stalled, a, b):
+        x.close()
 
 
 # ---------------------------------------------------------------- options
@@ -513,26 +586,64 @@ def test_options():
     assert r.returncode == 2
     r = subprocess.run([BIN, "--help"], capture_output=True)
     assert r.returncode == 0 and b"Usage" in r.stderr
+    r = subprocess.run([BIN, "--key", KEY], capture_output=True)
+    assert r.returncode == 2 and b"--key requires --cert" in r.stderr
+    r = subprocess.run([BIN, "--cert", "/nonexistent.pem", "-q"], capture_output=True)
+    assert r.returncode == 1 and r.stderr, r.stderr
     PASSED.append("option_validation")
     print("  ok  option_validation")
 
     # startup banner with terminal QR code
     port = free_port()
-    p = subprocess.Popen([BIN, "-p", str(port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p = subprocess.Popen([BIN, "-p", str(port), *cert_args()], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     time.sleep(0.5)
     p.terminate()
     out, _ = p.communicate(timeout=5)
     assert b"Open on other devices" in out and "█".encode() in out
+    assert f"Open on this computer:  {SCHEME}://localhost:{port}/".encode() in out, out
     assert p.returncode == 0
     PASSED.append("startup_banner_qr")
     print("  ok  startup_banner_qr")
 
+    if TLS:
+        test_tls_options()
+
+
+def test_tls_options():
+    # certificate and key in one PEM file, passed with --cert only
+    combined = os.path.join(CERT_DIR, "combined.pem")
+    with open(combined, "w") as f:
+        f.write(open(CERT).read() + open(KEY).read())
+    port = free_port()
+    p = subprocess.Popen([BIN, "-p", str(port), "-q", "--cert", combined])
+    try:
+        time.sleep(0.3)
+        assert get(port, "/health")[2] == b"ok\n"
+    finally:
+        p.terminate()
+        p.wait(5)
+    PASSED.append("tls_combined_pem")
+    print("  ok  tls_combined_pem")
+
+    # a key that doesn't belong to the certificate is refused at startup
+    other_cert, other_key = os.path.join(CERT_DIR, "o.pem"), os.path.join(CERT_DIR, "ok.pem")
+    make_cert(other_cert, other_key, "other")
+    r = subprocess.run([BIN, "-q", "--cert", CERT, "--key", other_key], capture_output=True)
+    assert r.returncode == 1 and b"does not match" in r.stderr, r.stderr
+    r = subprocess.run([BIN, "-q", "--cert", KEY, "--key", KEY], capture_output=True)  # not a certificate
+    assert r.returncode == 1 and b"cannot load certificate" in r.stderr, r.stderr
+    PASSED.append("tls_bad_pem_files")
+    print("  ok  tls_bad_pem_files")
+
 
 def main():
+    make_cert(CERT, KEY)
+    print(f"mode: {'HTTPS/WSS' if TLS else 'plain HTTP/WS'}")
     srv = Server()
+    prefixes = ("http_", "ws_", "tls_") if TLS else ("http_", "ws_")
     try:
         for name, fn in list(globals().items()):
-            if name.startswith(("http_", "ws_")) and callable(fn):
+            if name.startswith(prefixes) and callable(fn):
                 fn(srv)
         assert srv.proc.poll() is None, "server crashed"
         assert srv.stop() == 0, "server did not exit cleanly on SIGTERM"
@@ -540,7 +651,8 @@ def main():
         srv.proc.kill()
         raise
     test_options()
-    print(f"integration tests: {len(PASSED)} passed")
+    shutil.rmtree(CERT_DIR, ignore_errors=True)
+    print(f"integration tests ({'TLS' if TLS else 'plain'}): {len(PASSED)} passed")
 
 
 if __name__ == "__main__":

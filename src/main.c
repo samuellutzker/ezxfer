@@ -1,4 +1,5 @@
 #include "server.h"
+#include "tls.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,10 +20,16 @@ static void usage(const char *prog)
             "                     (default: http://<lan-ip>:<port>)\n"
             "  -w, --web FILE     serve FILE as the page template instead of the\n"
             "                     built-in one ({{VERSION}} is substituted)\n"
+            "  -c, --cert FILE    serve HTTPS using this PEM certificate (chain);\n"
+            "                     without it the server speaks plain HTTP\n"
+            "  -k, --key FILE     PEM private key for --cert (default: read the\n"
+            "                     key from the --cert file)\n"
             "      --no-qr        don't print a QR code in the terminal\n"
             "  -q, --quiet        no banner or logging\n"
-            "  -h, --help         show this help\n",
-            prog);
+            "  -h, --help         show this help\n"
+            "\n"
+            "TLS support: %s\n",
+            prog, tls_available() ? "available" : "not compiled in (rebuild with OpenSSL)");
 }
 
 int main(int argc, char **argv)
@@ -50,6 +57,12 @@ int main(int argc, char **argv)
         } else if ((!strcmp(a, "-w") || !strcmp(a, "--web")) && next) {
             cfg.web_file = next;
             i++;
+        } else if ((!strcmp(a, "-c") || !strcmp(a, "--cert")) && next) {
+            cfg.tls_cert = next;
+            i++;
+        } else if ((!strcmp(a, "-k") || !strcmp(a, "--key")) && next) {
+            cfg.tls_key = next;
+            i++;
         } else if (!strcmp(a, "--no-qr")) {
             cfg.print_qr = 0;
         } else if (!strcmp(a, "-q") || !strcmp(a, "--quiet")) {
@@ -62,6 +75,10 @@ int main(int argc, char **argv)
             usage(argv[0]);
             return 2;
         }
+    }
+    if (cfg.tls_key && !cfg.tls_cert) {
+        fprintf(stderr, "--key requires --cert\n");
+        return 2;
     }
     return server_run(&cfg);
 }
