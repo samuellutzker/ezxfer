@@ -226,9 +226,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 <script>
 'use strict';
 (function () {
-  const CHUNK = 256 * 1024;              // bytes per binary message
-  const MAX_BUFFERED = 4 * 1024 * 1024;  // WebSocket send buffer limit
-  const MAX_INFLIGHT = 16 * 1024 * 1024; // sent but not yet acknowledged
+  const CHUNK = 1024 * 1024;             // bytes per binary message
+  const MAX_INFLIGHT = 16 * 1024 * 1024; // sent but not yet acknowledged by the receiver
   const ACK_EVERY = 1024 * 1024;
   const HDR = 12;                        // binary header: u32 transfer id, u64 byte offset
   const BUILD = '{{BUILD}}';             // filled in by the server
@@ -236,6 +235,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const $ = (id) => document.getElementById(id);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // The sender waits for acknowledgements by message, not by timer: browsers
+  // throttle timers in background tabs to about one per second (or minute).
+  let pumpWaiter = null;
+  const pumpWait = () => new Promise((r) => { pumpWaiter = r; });
+  function kickPump() { const w = pumpWaiter; pumpWaiter = null; if (w) w(); }
 
   let ws = null, session = null, peerConnected = false, joinUrl = '';
   let intentionalClose = false, reconnectDelay = 800;
@@ -458,7 +462,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       case 'accept': onAccepted(m); break;
       case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') endOut(t, 'declined'); break; }
       case 'cancel': onCancel(m); break;
-      case 'ack': { const t = outgoing.get(m.id); if (t && (t.state === 'sending' || t.state === 'finishing')) { t.acked = Math.min(t.size, Math.max(t.acked, +m.bytes || 0)); render(t); } break; }
+      case 'ack': { const t = outgoing.get(m.id); if (t && (t.state === 'sending' || t.state === 'finishing')) { t.acked = Math.min(t.size, Math.max(t.acked, +m.bytes || 0)); render(t); kickPump(); } break; }
       case 'eof': onEof(m.id); break;
       case 'done': { const t = outgoing.get(m.id); if (t && OUT_ACTIVE.includes(t.state)) { t.acked = t.size; endOut(t, 'done'); } break; }
     }
@@ -485,7 +489,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   // Final states: done, declined, cancelled, failed (with t.error).
-  function endOut(t, state, error) { t.state = state; t.paused = false; t.error = error; render(t); }
+  function endOut(t, state, error) { t.state = state; t.paused = false; t.error = error; render(t); kickPump(); }
   function endIn(t, state, error) { abortWriter(t); t.state = state; t.paused = false; t.error = error; render(t); }
 
   function failActive(reason) {
@@ -501,6 +505,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     for (const t of incoming.values())
       if (t.state === 'receiving') { t.paused = true; render(t); }
     sendQueue.length = 0;
+    kickPump();
   }
 
   // The other device's page was reloaded: it kept its place in the session but
@@ -540,7 +545,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     // the file picker is open): offered as soon as the other device is back.
     if (!peerConnected) toast('Reconnecting — the files will be offered when the other device is back');
     for (const file of files) {
-      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0, base: 0, gen: 0, paused: false };
+      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0, base: 0, paused: false };
       outgoing.set(t.id, t);
       createRow(t, false);
       render(t);
@@ -550,7 +555,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const sendOffer = (t) => send({ type: 'offer', id: t.id, name: t.name, size: t.size, mime: t.file.type || '' });
 
   // "accept" starts a transfer, or continues it from `offset` after a reconnect.
-  function onAccepted(m) {
+  async function onAccepted(m) {
     const t = outgoing.get(m.id);
     if (!t || t.state === 'cancelled' || t.state === 'failed') {
       // unknown here (e.g. we reloaded) or over: don't leave the receiver waiting
@@ -559,12 +564,18 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     }
     if (!OUT_ACTIVE.includes(t.state)) return;
     const offset = Math.max(0, Math.min(t.size, Math.floor(+m.offset || 0)));
-    t.gen++;                       // invalidates any chunk read for the old position
+    // Chunks are sent as file slices that the browser reads itself. If the file
+    // can't be read any more (deleted, access revoked), the browser would fail the
+    // whole connection instead, so check first.
+    try { await t.file.slice(offset, offset + 1).arrayBuffer(); }
+    catch (_) { endOut(t, 'failed', 'Could not read file'); send({ type: 'cancel', id: t.id, from: 'sender' }); return; }
+    if (!OUT_ACTIVE.includes(t.state)) return;  // cancelled meanwhile
     t.sent = t.acked = t.base = offset;
     t.started = performance.now();
     t.state = 'sending'; t.paused = false;
     render(t);
     if (!sendQueue.includes(t)) sendQueue.push(t);
+    kickPump();
     pump();
   }
 
@@ -577,19 +588,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         while (t.state === 'sending' && !t.paused && t.sent < t.size) {
           const sock = ws;
           if (!sock || sock.readyState !== 1) return;  // resumes after reconnecting
-          if (sock.bufferedAmount > MAX_BUFFERED || t.sent - t.acked > MAX_INFLIGHT) { await sleep(10); continue; }
-          const gen = t.gen, start = t.sent, end = Math.min(start + CHUNK, t.size);
-          let buf;
-          try { buf = await t.file.slice(start, end).arrayBuffer(); }
-          catch (e) { endOut(t, 'failed', 'Could not read file'); send({ type: 'cancel', id: t.id, from: 'sender' }); break; }
-          if (t.gen !== gen || t.state !== 'sending' || t.paused || sock !== ws) continue;  // moved on meanwhile
-          const frame = new Uint8Array(HDR + buf.byteLength);
-          const dv = new DataView(frame.buffer);
+          if (t.sent - t.acked >= MAX_INFLIGHT) {
+            // woken by the next ack; the timer is only a safety net
+            await Promise.race([pumpWait(), sleep(1000)]);
+            continue;
+          }
+          const start = t.sent, end = Math.min(start + CHUNK, t.size);
+          const hdr = new Uint8Array(HDR), dv = new DataView(hdr.buffer);
           dv.setUint32(0, t.id);
           dv.setUint32(4, Math.floor(start / 4294967296));
           dv.setUint32(8, start >>> 0);
-          frame.set(new Uint8Array(buf), HDR);
-          sock.send(frame);
+          sock.send(new Blob([hdr, t.file.slice(start, end)]));  // read by the browser, no copy in JS
           t.sent = end;
           render(t);
         }

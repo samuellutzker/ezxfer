@@ -66,7 +66,9 @@ const mockSavePicker = () => {
     createWritable: async () => {
       const parts = [];
       return {
-        write: async (d) => { parts.push(new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d)); },
+        write: async (d) => {
+          if (window.__writeRate) await new Promise((r) => setTimeout(r, d.byteLength / window.__writeRate * 1000));
+          parts.push(new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d)); },
         close: async () => {
           const blob = new Blob(parts);
           const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
@@ -250,6 +252,33 @@ try {
   const [dl2] = await Promise.all([B.waitForEvent('download'), row(B, 'inList', 'after.bin').getByRole('button', { name: 'Accept' }).click()]);
   assert(sha(fs.readFileSync(await dl2.path())) === sha(after), 'post-cancel transfer intact');
   ok('connection keeps working after cancellations');
+
+  // ---------- a file that can't be read any more fails cleanly ----------
+  // Chunks are file slices the browser reads itself; an unreadable file must not
+  // take the connection down (or make it reconnect forever).
+  const gonePath = path.join(OUT, 'gone-before.bin');
+  fs.writeFileSync(gonePath, randomBytes(3 * 1024 * 1024));
+  await B.setInputFiles('#fileInput', gonePath);
+  await row(A, 'inList', 'gone-before.bin').waitFor();
+  fs.unlinkSync(gonePath);
+  await row(A, 'inList', 'gone-before.bin').getByRole('button', { name: 'Accept' }).click();
+  await row(B, 'outList', 'gone-before.bin').locator('.st-err', { hasText: 'Could not read file' }).waitFor();
+  await row(A, 'inList', 'gone-before.bin').locator('.st-err', { hasText: 'Cancelled' }).waitFor();
+  assert(await A.evaluate(() => window.ezxfer.connected), 'still connected');
+  const midPath = path.join(OUT, 'gone-midway.bin');
+  fs.writeFileSync(midPath, randomBytes(96 * 1024 * 1024));
+  await A.setInputFiles('#fileInput', midPath);
+  await row(B, 'inList', 'gone-midway.bin').getByRole('button', { name: 'Accept' }).click();
+  await B.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'gone-midway.bin') || {}).bytes > 4e6);
+  fs.unlinkSync(midPath);
+  await row(A, 'outList', 'gone-midway.bin').locator('.st-err').waitFor({ timeout: 20000 });
+  await row(B, 'inList', 'gone-midway.bin').locator('.st-err').waitFor({ timeout: 20000 });
+  const connsAfter = await A.evaluate(() => window.ezxfer.connections);
+  await new Promise((r) => setTimeout(r, 3000));
+  assert((await A.evaluate(() => window.ezxfer.connections)) === connsAfter, 'no reconnect loop');
+  await A.waitForFunction(() => window.ezxfer.connected);
+  ok('file deleted before or during a transfer fails cleanly ("Could not read file")',
+     await row(A, 'outList', 'gone-midway.bin').locator('.st-err').textContent());
 
   // ---------- resume: receiving phone loses its network mid-transfer ----------
   const progress = (page, name) => page.evaluate((n) => (window.ezxfer.transfers().find((t) => t.name === n) || {}).bytes || 0, name);
@@ -435,6 +464,39 @@ try {
   await E.locator('.toast', { hasText: 'not found' }).waitFor();
   await E.waitForFunction(() => window.ezxfer.session && window.ezxfer.session !== 'NOPE99');
   ok('stale session link falls back to a new session');
+
+  // ---------- a sender in a background tab keeps full speed ----------
+  // Browsers throttle timers in hidden tabs (to one per second, after 5 minutes
+  // one per minute). Emulate that on the sender, with a receiver that writes at
+  // ~25 MB/s so the flow-control window fills like on a real network: sending
+  // must be driven by the receiver's acknowledgements, not by timers.
+  {
+    const slowCtx = await browser.newContext({ ignoreHTTPSErrors: true });
+    await slowCtx.addInitScript(() => {
+      const st = window.setTimeout;
+      window.setTimeout = (fn, ms, ...a) => st(fn, Math.max(10000, ms || 0), ...a);
+    });
+    const S1 = await slowCtx.newPage(); watch(S1, 'throttled-sender');
+    const R1 = await (await browser.newContext({ ignoreHTTPSErrors: true })).newPage(); watch(R1, 'receiver');
+    await R1.addInitScript(() => { window.__writeRate = 25e6; });
+    await R1.addInitScript(mockSavePicker);
+    await R1.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await R1.waitForFunction(() => window.ezxfer.session);
+    await S1.goto(`${SCHEME}://127.0.0.1:${port}/?s=` + await R1.evaluate(() => window.ezxfer.session));
+    await S1.waitForFunction(() => document.body.classList.contains('connected'));
+    const bgPath = path.join(OUT, 'background.bin');
+    fs.writeFileSync(bgPath, randomBytes(64 * 1024 * 1024));
+    await S1.setInputFiles('#fileInput', bgPath);
+    t0 = Date.now();
+    await row(R1, 'inList', 'background.bin').getByRole('button', { name: 'Accept' }).click();
+    await R1.waitForFunction(() => window.__saved && window.__saved['background.bin'], null, { timeout: 60000 });
+    const secs = (Date.now() - t0) / 1000;
+    assert((await R1.evaluate(() => window.__saved['background.bin'].sha)) === sha(fs.readFileSync(bgPath)), 'intact');
+    assert(secs < 8, `64 MB from a throttled sender took ${secs.toFixed(1)} s`);
+    fs.unlinkSync(bgPath);
+    await slowCtx.close(); await R1.context().close();
+    ok('sender with background-tab timer throttling keeps full speed', `64 MB in ${secs.toFixed(1)} s`);
+  }
 
   // ---------- server upgraded while a page stays open ----------
   // An open page reconnects to a restarted server by itself. If the server now
