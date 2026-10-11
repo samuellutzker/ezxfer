@@ -28,6 +28,8 @@ static void usage(const char *prog)
             "                     how long a session waits for its devices to\n"
             "                     reconnect after both dropped (default 120)\n"
             "      --no-qr        don't print a QR code in the terminal\n"
+            "      --compact-qr   print a half-height terminal QR code (may show\n"
+            "                     gaps in terminals with extra line spacing)\n"
             "  -q, --quiet        no banner or logging\n"
             "  -h, --help         show this help\n"
             "\n"
@@ -78,6 +80,8 @@ int main(int argc, char **argv)
             i++;
         } else if (!strcmp(a, "--no-qr")) {
             cfg.print_qr = 0;
+        } else if (!strcmp(a, "--compact-qr")) {
+            cfg.print_qr = 2;
         } else if (!strcmp(a, "-q") || !strcmp(a, "--quiet")) {
             cfg.quiet = 1;
         } else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {

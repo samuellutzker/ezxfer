@@ -890,15 +890,35 @@ static void print_banner(const server_config *cfg)
         static qr_code qr;
         if (qr_encode((const uint8_t *)url, strlen(url), QR_ECC_L, 0, -1, &qr) == 0) {
             const int border = 2;
-            for (int y = -border; y < qr.size + border; y += 2) {
-                printf("  \033[30;47m");
-                for (int x = -border; x < qr.size + border; x++) {
-                    int top = qr_module(&qr, x, y), bot = qr_module(&qr, x, y + 1);
-                    fputs(top && bot ? "\xe2\x96\x88" : top ? "\xe2\x96\x80"
-                                                    : bot ? "\xe2\x96\x84" : " ",
-                          stdout);
+            if (cfg->print_qr == 2) {
+                /* compact: two modules per line using half-block glyphs. Some
+                 * terminals (e.g. macOS Terminal) leave gaps between the lines. */
+                for (int y = -border; y < qr.size + border; y += 2) {
+                    printf("  \033[30;107m");
+                    for (int x = -border; x < qr.size + border; x++) {
+                        int top = qr_module(&qr, x, y), bot = qr_module(&qr, x, y + 1);
+                        fputs(top && bot ? "\xe2\x96\x88" : top ? "\xe2\x96\x80"
+                                                        : bot ? "\xe2\x96\x84" : " ",
+                              stdout);
+                    }
+                    printf("\033[0m\n");
                 }
-                printf("\033[0m\n");
+            } else {
+                /* default: each module is two spaces with a black or white
+                 * background. Backgrounds fill the whole cell including the line
+                 * spacing, so this renders without gaps in every terminal. */
+                for (int y = -border; y < qr.size + border; y++) {
+                    int cur = -1;
+                    printf("  ");
+                    for (int x = -border; x < qr.size + border; x++) {
+                        int dark = qr_module(&qr, x, y);
+                        if (dark != cur)
+                            fputs(dark ? "\033[40m" : "\033[107m", stdout);
+                        cur = dark;
+                        fputs("  ", stdout);
+                    }
+                    printf("\033[0m\n");
+                }
             }
             printf("\n");
         }

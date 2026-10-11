@@ -9,6 +9,7 @@ self-signed certificate (verified by the client), plus TLS-specific tests.
 import base64
 import hashlib
 import json
+import re
 import os
 import shutil
 import socket
@@ -652,14 +653,41 @@ def test_options():
     print("  ok  option_validation")
 
     # startup banner with terminal QR code
-    port = free_port()
-    p = subprocess.Popen([BIN, "-p", str(port), *cert_args()], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    time.sleep(0.5)
-    p.terminate()
-    out, _ = p.communicate(timeout=5)
-    assert b"Open on other devices" in out and "█".encode() in out
-    assert f"Open on this computer:  {SCHEME}://localhost:{port}/".encode() in out, out
-    assert p.returncode == 0
+    def banner(*extra):
+        port = free_port()
+        p = subprocess.Popen([BIN, "-p", str(port), *cert_args(), *extra],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(0.5)
+        p.terminate()
+        out, _ = p.communicate(timeout=5)
+        assert p.returncode == 0
+        assert b"Open on other devices" in out
+        assert f"Open on this computer:  {SCHEME}://localhost:{port}/".encode() in out, out
+        return out.decode()
+
+    # default: modules drawn as background-coloured cells (no glyphs, so no gaps
+    # between lines in any terminal); parse it back and check the finder patterns
+    out = banner()
+    assert "█" not in out and "\x1b[40m" in out
+    grid = []
+    for line in out.splitlines():
+        if "\x1b[" not in line:
+            continue
+        cur, row = None, ""
+        for tok in re.findall(r"\x1b\[[0-9;]+m| ", line[2:]):
+            if tok.startswith("\x1b"):
+                cur = tok[2:-1]
+            elif cur in ("40", "107"):
+                row += "1" if cur == "40" else "0"
+        grid.append(row[::2])
+    n = len(grid) - 4  # 2-module quiet zone on each side
+    assert all(len(r) == n + 4 for r in grid) and (n - 17) % 4 == 0, (n, [len(r) for r in grid])
+    finder = ["1111111", "1000001", "1011101", "1011101", "1011101", "1000001", "1111111"]
+    for ox, oy in ((2, 2), (n - 5, 2), (2, n - 5)):
+        assert [grid[oy + i][ox:ox + 7] for i in range(7)] == finder, (ox, oy)
+
+    out = banner("--compact-qr")
+    assert "█" in out  # half-block glyphs, two modules per line
     PASSED.append("startup_banner_qr")
     print("  ok  startup_banner_qr")
 
