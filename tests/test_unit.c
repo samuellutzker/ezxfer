@@ -166,6 +166,28 @@ static void test_ws_frames(void)
     for (size_t i = 0; i < n; i++)
         ok &= f.payload[i] == (uint8_t)i;
     CHECK(ok);
+    /* Unmasking at every length and alignment matches the byte-wise definition */
+    int unmask_ok = 1;
+    for (size_t len = 0; len < 100; len++)
+        for (size_t align = 0; align < 8; align++) {
+            uint8_t raw[8 + 14 + 100], expect[100];
+            uint8_t key[4] = {(uint8_t)(len * 31 + 7), 0xA5, (uint8_t)align, 0x3C};
+            uint8_t *fr = raw + align;
+            size_t hl = 0;
+            fr[hl++] = 0x82;
+            fr[hl++] = (uint8_t)(0x80 | len);
+            memcpy(fr + hl, key, 4);
+            hl += 4;
+            for (size_t i = 0; i < len; i++) {
+                expect[i] = (uint8_t)(i * 13 + len);
+                fr[hl + i] = expect[i] ^ key[i & 3];
+            }
+            if (ws_parse_frame(fr, hl + len, 1 << 20, 1, &f) != (long)(hl + len) ||
+                memcmp(f.payload, expect, len) != 0)
+                unmask_ok = 0;
+        }
+    CHECK(unmask_ok);
+
     /* MSB of a 64-bit length must be zero */
     buf[2] = 0x80;
     CHECK(ws_parse_frame(buf, n + 14, (size_t)-1, 1, &f) == WS_ERR_PROTOCOL);

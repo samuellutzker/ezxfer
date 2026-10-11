@@ -228,9 +228,20 @@ long ws_parse_frame(uint8_t *buf, size_t len, size_t max_payload, int require_ma
         return 0;
     f->payload = buf + hl;
     f->len = pl;
-    if (f->masked)
-        for (uint64_t i = 0; i < pl; i++)
+    if (f->masked) {
+        /* Unmask 8 bytes at a time (the 4-byte mask repeated twice); this is
+         * the server's main per-byte cost when relaying. */
+        uint8_t m8b[8] = {mask[0], mask[1], mask[2], mask[3], mask[0], mask[1], mask[2], mask[3]};
+        uint64_t m8, w, i = 0;
+        memcpy(&m8, m8b, 8);
+        for (; i + 8 <= pl; i += 8) {
+            memcpy(&w, f->payload + i, 8);
+            w ^= m8;
+            memcpy(f->payload + i, &w, 8);
+        }
+        for (; i < pl; i++)
             f->payload[i] ^= mask[i & 3];
+    }
     return (long)(hl + pl);
 }
 
