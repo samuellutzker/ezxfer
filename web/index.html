@@ -157,11 +157,6 @@ body:not(.connected) .locked { display: block; }
 .toasts { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 50; width: min(92vw, 420px); pointer-events: none; }
 .toast { pointer-events: auto; background: rgba(20,22,34,.92); color: #fff; padding: 12px 16px; border-radius: 14px; font-size: 14px; box-shadow: 0 12px 30px -10px rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.08); animation: pop .25s ease-out; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
 .toast.err { border-color: rgba(255,93,115,.5); }
-.pill { cursor: pointer; }
-.logpanel { position: fixed; left: 50%; bottom: calc(12px + env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(96vw, 720px); z-index: 60; background: rgba(16,18,28,.96); color: #e8eaf2; border: 1px solid rgba(255,255,255,.1); border-radius: 16px; box-shadow: 0 20px 60px -20px rgba(0,0,0,.7); padding: 12px; }
-.loghead { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
-.loghead .btn { color: #e8eaf2; }
-.logpanel pre { margin: 0; max-height: 50vh; overflow: auto; font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 26px; opacity: .8; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
@@ -227,10 +222,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   <footer>Files go straight from one browser to the other through this server and are never stored.</footer>
 </div>
 <div class="toasts" id="toasts"></div>
-<div class="logpanel" id="logPanel" hidden>
-  <div class="loghead"><b>Connection log</b><span><button class="btn ghost small" id="logCopy" type="button">Copy</button> <button class="btn ghost small" id="logClose" type="button">Close</button></span></div>
-  <pre id="logText"></pre>
-</div>
 
 <script>
 'use strict';
@@ -254,15 +245,14 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   let nextId = 1 + crypto.getRandomValues(new Uint32Array(1))[0] % 1000000000;
   // Identifies this tab to the server and the other device. A device that
   // reconnects with the same id gets its session slot back and transfers resume.
-  // Kept in localStorage so it survives the page being reloaded or its tab being
-  // recreated, which phones do to background pages (e.g. while the file picker is
-  // open, and pages opened from the camera app live in a "custom tab").
+  // Kept in sessionStorage so it survives the tab being reloaded, which phones
+  // do to background tabs (e.g. while the file picker is open).
   const clientId = (() => {
     const fresh = randomHex(12);
     try {
-      const kept = localStorage.getItem('ezxfer-client');
+      const kept = sessionStorage.getItem('ezxfer-client');
       if (kept && /^[0-9a-f]{24}$/.test(kept)) return kept;
-      localStorage.setItem('ezxfer-client', fresh);
+      sessionStorage.setItem('ezxfer-client', fresh);
     } catch (_) {}
     return fresh;
   })();
@@ -303,18 +293,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (/Linux/.test(ua)) return 'Linux computer';
     return 'Device';
   }
-  // Connection log: tap the status pill to see it. Helps to find out what a
-  // phone's browser did to the connection (suspended, closed, reconnected...).
-  const logLines = [];
-  function log(msg) {
-    const d = new Date();
-    const line = d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0') + '  ' + msg;
-    logLines.push(line);
-    if (logLines.length > 300) logLines.shift();
-    if (!$('logPanel').hidden) $('logText').textContent = logLines.join('\n');
-  }
   function toast(msg, isErr) {
-    log('toast: ' + msg);
     const t = el('div', 'toast' + (isErr ? ' err' : ''), msg);
     $('toasts').appendChild(t);
     setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3800);
@@ -330,7 +309,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     sock.binaryType = 'arraybuffer';
     ws = sock;
     connections++;
-    log('connecting' + (code ? ' to session ' + code : ' (new session)'));
     setPill('wait', code ? 'Joining…' : 'Connecting…');
     sock.onmessage = (e) => {
       if (sock !== ws) return;
@@ -340,15 +318,14 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         onMessage(msg);
       } else onBinary(e.data);
     };
-    sock.onopen = () => { reconnectDelay = 800; log('connected to server'); };
+    sock.onopen = () => { reconnectDelay = 800; };
     sock.onclose = (e) => socketLost(sock, e.code);
   }
 
   // Our connection dropped: keep transfers paused and rejoin the same session.
   function socketLost(sock, code) {
     if (sock !== ws) return;
-    log('connection closed' + (code ? ' (code ' + code + ')' : '') + (document.hidden ? ', page hidden' : ''));
-    setPeer(false, !intentionalClose && code !== 4001);
+    setPeer(false);
     if (code === 4001) {
       // the server handed our slot to a connection with the same id: this tab was duplicated
       intentionalClose = true;
@@ -380,27 +357,19 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     aliveCheck = setTimeout(() => {
       aliveCheck = null;
       if (ws !== sock || lastRx >= asked) return;  // something arrived: alive
-      // If this timer fired late, the page was suspended meanwhile (phones do that
-      // while e.g. the file picker is open) and the answer may still be queued
-      // behind it. That says nothing about the connection: ask again.
-      const late = performance.now() - asked - timeoutMs;
-      if (late > 1000) { log('liveness check: page was suspended for ' + Math.round(late / 1000) + ' s, checking again'); checkAlive(timeoutMs); return; }
-      log('liveness check: no answer within ' + timeoutMs / 1000 + ' s, reconnecting');
       sock.onmessage = null; sock.onclose = null;
       try { sock.close(); } catch (_) {}
       reconnectDelay = 200;
       socketLost(sock);
     }, timeoutMs);
   }
-  function wakeUp(e) {  // back on the page: make sure the connection still works
-    if (e && e.type) log(e.type + (document.hidden ? ' (hidden)' : ''));
+  function wakeUp() {  // back on the page: make sure the connection still works
     if (intentionalClose || document.hidden) return;
     if (!ws || ws.readyState > 1) { reconnectDelay = 800; connect(session); } else checkAlive(3000, true);
   }
   setInterval(() => { if (!document.hidden && performance.now() - lastRx > 15000) checkAlive(10000); }, 5000);
 
   function leave(newCode) {
-    send({ type: 'bye' });  // a deliberate leave: the other side needn't wait for us
     intentionalClose = true;
     peerId = ''; peerInstance = '';
     const old = ws; ws = null;
@@ -439,25 +408,16 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         if (m.connected) {
           const id = String(m.id || '');
           const same = id !== '' && id === peerId;
-          const quiet = same && peerAway;  // back within the grace period: no fuss
-          log('peer connected' + (same ? ' (same device)' : ''));
           if (!same) { failActive('The other device left'); peerId = id; peerInstance = ''; }
-          peerLeaving = false;
           setPeer(true);
           send({ type: 'info', name: deviceName(), instance: instanceId });
-          if (same) { resumeWithPeer(); if (!quiet) toast('Device reconnected'); } else toast('Device connected');
+          if (same) { resumeWithPeer(); toast('Device reconnected'); } else toast('Device connected');
         } else {
-          log('peer disconnected' + (peerLeaving ? ' (left)' : ''));
-          // Phones lose their connection for a moment all the time (file picker,
-          // screen lock). Unless the device said goodbye, wait a little before
-          // treating it as gone; transfers pause and resume meanwhile.
-          setPeer(false, !peerLeaving);
+          setPeer(false);
           pauseActive();
-          if (peerLeaving) toast('Device disconnected', true);
-          peerLeaving = false;
+          toast('Device disconnected — waiting for it to come back', true);
         }
         break;
-      case 'bye': peerLeaving = true; break;
       case 'error':
         // Unknown, expired or full session: start a fresh one instead
         intentionalClose = true;
@@ -486,30 +446,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     }
   }
 
-  // `soft`: the connection to the other device dropped but may come back soon.
-  // Keep showing the transfer screen ("Reconnecting…") for a while instead of
-  // jumping back to the QR code.
-  const AWAY_GRACE = 15000;
-  let peerAway = false, awayTimer = null, peerLeaving = false;
-  function setPeer(on, soft) {
+  function setPeer(on) {
     peerConnected = on;
-    clearTimeout(awayTimer); awayTimer = null;
-    if (!on && soft && document.body.classList.contains('connected')) {
-      peerAway = true;
-      setPill('wait', 'Reconnecting…');
-      awayTimer = setTimeout(() => {
-        awayTimer = null;
-        log('peer did not come back within ' + AWAY_GRACE / 1000 + ' s');
-        setPeer(false);
-        toast('Device disconnected — waiting for it to come back', true);
-      }, AWAY_GRACE);
-    } else {
-      peerAway = false;
-      document.body.classList.toggle('connected', on);
-      if (on) setPill('on', 'Connected');
-      else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
-      if (!on) $('peerName').textContent = 'Device';
-    }
+    document.body.classList.toggle('connected', on);
+    if (on) setPill('on', 'Connected');
+    else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
+    if (!on) $('peerName').textContent = 'Device';
     for (const t of outgoing.values()) if (t.state === 'offered') renderOut(t);
   }
 
@@ -995,33 +937,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   });
   // Phones suspend sockets in the background; reconnect promptly on return.
   document.addEventListener('visibilitychange', wakeUp);
-  document.addEventListener('resume', wakeUp);  // Chrome un-freezing the page
-  document.addEventListener('freeze', () => log('freeze'));
   window.addEventListener('focus', wakeUp);
   window.addEventListener('pageshow', wakeUp);
-  // the page is really going away (closed, navigated): tell the other device now
-  window.addEventListener('pagehide', () => { log('pagehide'); send({ type: 'bye' }); });
-  $('pill').addEventListener('click', () => {
-    const p = $('logPanel');
-    p.hidden = !p.hidden;
-    if (!p.hidden) { $('logText').textContent = logLines.join('\n'); $('logText').scrollTop = 1e9; }
-  });
-  $('logClose').addEventListener('click', () => { $('logPanel').hidden = true; });
-  $('logCopy').addEventListener('click', async () => {
-    const text = 'ezxfer {{VERSION}} ' + navigator.userAgent + '\n' + logLines.join('\n');
-    try { await navigator.clipboard.writeText(text); toast('Log copied'); }
-    catch (_) { const r = document.createRange(); r.selectNodeContents($('logText')); const s2 = getSelection(); s2.removeAllRanges(); s2.addRange(r); toast('Log selected — copy it manually'); }
-  });
 
   // expose a tiny hook for automated tests
   window.ezxfer = {
     get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; },
-    get resumes() { return resumes; }, get connections() { return connections; }, get log() { return logLines.slice(); },
+    get resumes() { return resumes; }, get connections() { return connections; },
     transfers: () => [...outgoing.values(), ...incoming.values()].map((t) => ({
       name: t.name, dir: t.file ? 'out' : 'in', state: t.state, paused: !!t.paused, via: t.via, bytes: t.file ? t.acked : t.received })),
     // Simulates a connection that died silently: the socket stays "open" but nothing arrives.
     freezeConnection() { if (ws) ws.onmessage = null; },
-    checkAlive: (ms) => checkAlive(ms, true),
     // Simulates losing the network: `abandon` drops the socket without closing it, like a
     // phone going out of range, so the server only learns about it when the device returns.
     dropConnection(abandon) {

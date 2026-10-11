@@ -102,11 +102,8 @@ Memory therefore stays bounded however large the file is.
 - Phones often drop the connection while a page is in the background, for example while the file picker is open. To cope with that:
   - Coming back to the page triggers a quick check with the server, and a connection that died silently is replaced within about 3 seconds. The page also checks every 15 seconds of silence.
   - Files picked while the connection is down are offered as soon as the other device is back.
-  - The client id is kept in `localStorage`. If the phone reloads or recreates the tab, as can happen with pages opened from the camera app, the page gets its place in the session back instead of ending up in a new session.
-  - If the other device drops for a moment, the page shows "Reconnecting…" for up to 15 seconds instead of going back to the QR code. A page that is really closed tells the other device right away.
-  - A liveness check whose answer arrives late because the browser had suspended the page is repeated, not treated as a dead connection.
+  - The client id is kept per tab (`sessionStorage`). If the phone reloads the tab, the page gets its place in the session back instead of ending up in a new session.
 - Reloading the page still starts its transfers over, because the browser can't keep the selected file or the partial download across a reload. Transfers in progress end with "The other device reloaded the page" instead of waiting forever.
-- **Connection log:** tap the status pill (top right) to see a timestamped log of what happened to the connection: page hidden and shown, connections closed and reopened, liveness checks. **Copy** puts it on the clipboard. This is handy for finding out what a phone's browser did.
 - When the server is upgraded, pages left open would reconnect and keep running the old code. The server therefore sends a build id, and a page that's older than the server reloads itself once.
 
 The join URL uses the address the page was opened with. If that was `localhost`, the server substitutes the machine's LAN IPv4 address. Use `--url` when running behind a reverse proxy or NAT.

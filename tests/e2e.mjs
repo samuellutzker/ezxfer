@@ -332,58 +332,9 @@ try {
   await A.screenshot({ path: path.join(OUT, 'desktop-transfers.png') });
   await B.screenshot({ path: path.join(OUT, 'phone-transfers.png'), fullPage: true });
 
-  // ---------- Chrome suspends the page (as Android does while the file picker is open) ----------
-  // A liveness check is pending when the page gets frozen; when it's unfrozen the
-  // late timer must not mistake the queued answer for a dead connection.
-  const cdpB = await phoneCtx.newCDPSession(B);
-  const connsBefore = await B.evaluate(() => window.ezxfer.connections);
-  await B.evaluate(() => window.ezxfer.checkAlive(2000));
-  await cdpB.send('Page.setWebLifecycleState', { state: 'frozen' });
-  await new Promise((r) => setTimeout(r, 20000));  // longer than the ~15 s spent in a file picker
-  await cdpB.send('Page.setWebLifecycleState', { state: 'active' });
-  await new Promise((r) => setTimeout(r, 4000));
-  assert(await A.evaluate(() => document.body.classList.contains('connected')), 'desktop still connected');
-  assert((await B.evaluate(() => window.ezxfer.connections)) === connsBefore, 'phone kept its connection');
-  const frozenOk = randomBytes(150000);
-  await B.setInputFiles('#fileInput', { name: 'after-freeze.jpg', mimeType: 'image/jpeg', buffer: frozenOk });
-  await row(A, 'inList', 'after-freeze.jpg').getByRole('button', { name: 'Accept' }).click();
-  await A.waitForFunction(() => window.__saved['after-freeze.jpg']);
-  ok('page frozen for 20 s keeps its connection (no false "dead connection")');
-
-  // ---------- a short drop doesn't throw the other side back to the QR screen ----------
-  const logMark = await A.evaluate(() => window.ezxfer.log.length);
-  await B.evaluate(() => window.ezxfer.dropConnection(true));
-  assert(await A.evaluate(() => document.body.classList.contains('connected')), 'still on the transfer screen');
-  await A.waitForFunction((m) => document.getElementById('pillText').textContent === 'Connected'
-    && window.ezxfer.log.slice(m).some((l) => l.includes('peer connected (same device)')), logMark, { timeout: 10000 });
-  const sinceDrop = await A.evaluate((m) => window.ezxfer.log.slice(m), logMark);
-  assert(!sinceDrop.some((l) => l.includes('toast: Device')), 'no disconnect/reconnect toasts: ' + sinceDrop.join(' | '));
-  ok('brief drop shows "Reconnecting…" and recovers without leaving the transfer screen');
-
-  // ---------- the connection log opens from the status pill ----------
-  await A.click('#pill');
-  await A.waitForSelector('#logPanel:not([hidden])');
-  assert((await A.textContent('#logText')).includes('connected to server'), 'log content');
-  await A.click('#logClose');
-  ok('connection log opens from the status pill');
-
-  // ---------- a recreated tab (e.g. Chrome custom tab) reclaims its place ----------
-  // The old page's connection still looks alive to the server; the new tab shares
-  // the browser's storage, so it gets the slot back instead of "session full".
-  await B.evaluate(() => window.ezxfer.freezeConnection());
-  const B3 = await phoneCtx.newPage(); watch(B3, 'phone3');
-  await B3.goto(scanned);
-  await B3.waitForFunction(() => document.body.classList.contains('connected'));
-  assert((await B3.evaluate(() => window.ezxfer.session)) === session, 'same session in the new tab');
-  await B.waitForFunction(() => document.getElementById('pillText').textContent === 'Opened in another tab');
-  await B.close();
-  ok('recreated tab reclaims its slot; the old tab steps aside');
-
   // ---------- phone leaves, then rejoins the same session ----------
-  t0 = Date.now();
-  await B3.close();
+  await B.close();
   await A.waitForFunction(() => !document.body.classList.contains('connected'));
-  assert(Date.now() - t0 < 5000, 'a closed page is noticed right away (it says goodbye)');
   assert((await A.textContent('#pillText')) === 'Waiting for device', 'back to waiting');
   const B2 = await phoneCtx.newPage(); watch(B2, 'phone2');
   await B2.goto(scanned);
