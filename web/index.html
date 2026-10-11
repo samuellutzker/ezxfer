@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d14">
+<meta name="color-scheme" content="dark light">
+<title>ezxfer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c5cff'/%3E%3Cstop offset='1' stop-color='%2300d4ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M10 13h12l-4-4M22 19H10l4 4' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #0b0d14;
+  --bg2: #121624;
+  --card: rgba(255,255,255,.045);
+  --card-border: rgba(255,255,255,.09);
+  --text: #eef0f7;
+  --muted: #9aa0b4;
+  --faint: rgba(255,255,255,.06);
+  --accent: #7c5cff;
+  --accent2: #00d4ff;
+  --ok: #2fd59a;
+  --warn: #ffb547;
+  --err: #ff5d73;
+  --radius: 20px;
+  --shadow: 0 20px 60px -20px rgba(0,0,0,.6);
+  --grad: linear-gradient(135deg, var(--accent), var(--accent2));
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f5fb;
+    --bg2: #e9ebf6;
+    --card: rgba(255,255,255,.8);
+    --card-border: rgba(20,25,60,.08);
+    --text: #141826;
+    --muted: #5d6479;
+    --faint: rgba(20,25,60,.05);
+    --shadow: 0 20px 50px -25px rgba(40,45,90,.35);
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(900px 500px at 10% -10%, rgba(124,92,255,.25), transparent 60%),
+    radial-gradient(800px 500px at 110% 10%, rgba(0,212,255,.18), transparent 60%),
+    linear-gradient(var(--bg), var(--bg2));
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+button, input { font: inherit; color: inherit; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 20px 18px 40px; }
+
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 22px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 20px; letter-spacing: -.02em; }
+.brand .logo { width: 34px; height: 34px; border-radius: 10px; background: var(--grad); display: grid; place-items: center; box-shadow: 0 6px 20px -6px var(--accent); }
+.brand .logo svg { width: 20px; height: 20px; }
+.brand small { font-weight: 500; color: var(--muted); font-size: 12px; margin-left: 2px; }
+
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px; border-radius: 999px; background: var(--card); border: 1px solid var(--card-border); font-size: 13px; color: var(--muted); white-space: nowrap; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 0 currentColor; }
+.pill.wait .dot { background: var(--warn); animation: pulse 1.6s infinite; color: rgba(255,181,71,.5); }
+.pill.on .dot { background: var(--ok); color: rgba(47,213,154,.5); animation: pulse 2.4s infinite; }
+.pill.off .dot { background: var(--err); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 currentColor; } 70% { box-shadow: 0 0 0 8px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+
+.grid { display: grid; grid-template-columns: minmax(0, 380px) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 820px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+
+.card { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 22px; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+.card h2 { margin: 0 0 4px; font-size: 17px; letter-spacing: -.01em; }
+.card p.sub { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; }
+
+/* Connect card */
+.qr-box { position: relative; background: #fff; border-radius: 16px; padding: 10px; aspect-ratio: 1; display: grid; place-items: center; overflow: hidden; }
+.qr-box img { width: 100%; height: 100%; display: block; image-rendering: pixelated; transition: opacity .3s; }
+.qr-box img:not([src]) { opacity: 0; }
+.qr-box .spinner { position: absolute; }
+.spinner { width: 28px; height: 28px; border: 3px solid rgba(0,0,0,.1); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.code-row { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 6px; gap: 10px; }
+.code { font: 600 26px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .18em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.link { font-size: 12.5px; color: var(--muted); word-break: break-all; }
+.divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 20px 0 14px; text-transform: uppercase; letter-spacing: .08em; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--card-border); }
+form.join { display: flex; gap: 8px; }
+form.join input { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 12px; background: var(--faint); border: 1px solid var(--card-border); outline: none; text-transform: uppercase; letter-spacing: .15em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+form.join input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,92,255,.25); }
+
+.btn { appearance: none; border: 0; cursor: pointer; border-radius: 12px; padding: 11px 16px; font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; transition: transform .08s, filter .15s, background .15s; white-space: nowrap; }
+.btn:active { transform: scale(.97); }
+.btn.primary { background: var(--grad); color: #fff; box-shadow: 0 8px 22px -10px var(--accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.ghost { background: var(--faint); border: 1px solid var(--card-border); }
+.btn.ghost:hover { background: rgba(127,127,127,.14); }
+.btn.small { padding: 7px 11px; font-size: 13px; border-radius: 10px; }
+.btn.danger { color: var(--err); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.iconbtn { width: 34px; height: 34px; padding: 0; border-radius: 10px; }
+
+/* Connected state: the connect card shrinks to a compact summary */
+.connected-info { display: none; align-items: center; gap: 14px; }
+.connected-info .avatar { width: 46px; height: 46px; border-radius: 14px; background: var(--grad); display: grid; place-items: center; flex: none; }
+.connected-info .avatar svg { width: 24px; height: 24px; }
+.connected-info .who { flex: 1; min-width: 0; }
+.connected-info .who b { display: block; font-size: 16px; }
+.connected-info .who span { color: var(--muted); font-size: 13px; }
+body.connected .waiting-only { display: none; }
+body.connected .connected-info { display: flex; }
+
+/* Transfer card */
+.drop { display: block; position: relative; border: 2px dashed var(--card-border); border-radius: 16px; padding: 34px 18px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s, transform .2s; }
+.drop:hover, .drop.over { border-color: var(--accent); background: rgba(124,92,255,.07); }
+.drop.over { transform: scale(1.01); }
+.drop .big { width: 56px; height: 56px; margin: 0 auto 12px; border-radius: 16px; background: var(--grad); display: grid; place-items: center; box-shadow: 0 10px 28px -10px var(--accent); }
+.drop .big svg { width: 28px; height: 28px; }
+.drop b { display: block; font-size: 16px; margin-bottom: 2px; }
+.drop span { color: var(--muted); font-size: 13.5px; }
+.drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+body:not(.connected) .drop { pointer-events: none; opacity: .4; }
+.locked { display: none; color: var(--muted); font-size: 13px; text-align: center; margin-top: 10px; }
+body:not(.connected) .locked { display: block; }
+
+.section-title { display: flex; justify-content: space-between; align-items: center; margin: 22px 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.list { display: flex; flex-direction: column; gap: 10px; }
+.empty { color: var(--muted); font-size: 13.5px; padding: 14px; text-align: center; border-radius: 14px; background: var(--faint); }
+
+.item { display: grid; grid-template-columns: 42px minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 12px; border-radius: 14px; background: var(--faint); border: 1px solid transparent; animation: pop .25s ease-out; }
+.item.incoming.offered { border-color: rgba(124,92,255,.5); background: rgba(124,92,255,.09); }
+@keyframes pop { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
+.ficon { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; font-size: 10.5px; font-weight: 700; letter-spacing: .03em; color: #fff; background: linear-gradient(135deg, #5b6382, #3a4058); text-transform: uppercase; overflow: hidden; }
+.meta { min-width: 0; }
+.name { font-weight: 600; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status { font-size: 12.5px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
+.status .st-done { color: var(--ok); }
+.status .st-err { color: var(--err); }
+.bar { height: 5px; border-radius: 99px; background: rgba(127,127,127,.18); overflow: hidden; margin-top: 7px; display: none; }
+.bar i { display: block; height: 100%; width: 0; background: var(--grad); border-radius: 99px; transition: width .2s; }
+.item.sending .bar, .item.receiving .bar, .item.finishing .bar { display: block; }
+.actions { display: flex; gap: 6px; }
+@media (max-width: 480px) {
+  .wrap { padding: 14px 12px 32px; }
+  .card { padding: 18px; border-radius: 18px; }
+  .item { grid-template-columns: 38px minmax(0,1fr); }
+  .ficon { width: 38px; height: 38px; }
+  .actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .actions .btn { flex: 1; }
+  .code { font-size: 22px; }
+}
+
+.toasts { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 50; width: min(92vw, 420px); pointer-events: none; }
+.toast { pointer-events: auto; background: rgba(20,22,34,.92); color: #fff; padding: 12px 16px; border-radius: 14px; font-size: 14px; box-shadow: 0 12px 30px -10px rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.08); animation: pop .25s ease-out; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+.toast.err { border-color: rgba(255,93,115,.5); }
+footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 26px; opacity: .8; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h14l-4-4M19 15H5l4 4"/></svg></div>
+      ezxfer <small>v{{VERSION}}</small>
+    </div>
+    <div id="pill" class="pill wait"><span class="dot"></span><span id="pillText">Starting…</span></div>
+  </header>
+
+  <main class="grid">
+    <section class="card" id="connectCard">
+      <div class="waiting-only">
+        <h2>Connect a device</h2>
+        <p class="sub">Scan this code with your phone's camera, or open the link on another computer.</p>
+        <div class="qr-box"><div class="spinner" id="qrSpin"></div><img id="qr" alt="QR code to join this session"></div>
+        <div class="code-row">
+          <div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Session code</div>
+            <div class="code" id="code">······</div>
+          </div>
+          <button class="btn ghost iconbtn" id="copyBtn" title="Copy link" aria-label="Copy link">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+          </button>
+        </div>
+        <div class="link" id="link"></div>
+        <div class="divider">or join a session</div>
+        <form class="join" id="joinForm" autocomplete="off">
+          <label class="sr" for="joinCode">Session code</label>
+          <input id="joinCode" maxlength="6" placeholder="CODE" inputmode="text" autocapitalize="characters" spellcheck="false">
+          <button class="btn primary" type="submit">Join</button>
+        </form>
+      </div>
+      <div class="connected-info">
+        <div class="avatar"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/></svg></div>
+        <div class="who"><b id="peerName">Device</b><span>Connected · session <span id="code2"></span></span></div>
+        <button class="btn ghost small danger" id="leaveBtn">Disconnect</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Transfer files</h2>
+      <p class="sub" id="transferSub">Files you pick are offered to the other device. Each one starts as soon as they accept it.</p>
+      <label class="drop" id="drop">
+        <input type="file" id="fileInput" multiple>
+        <div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg></div>
+        <b>Choose files to send</b>
+        <span>Tap to browse · or drop them here</span>
+      </label>
+      <div class="locked">Waiting for another device to connect…</div>
+
+      <div class="section-title"><span>Incoming</span><button class="btn ghost small" id="acceptAll" hidden>Accept all</button></div>
+      <div class="list" id="inList"><div class="empty">Nothing received yet</div></div>
+
+      <div class="section-title"><span>Outgoing</span></div>
+      <div class="list" id="outList"><div class="empty">Nothing sent yet</div></div>
+    </section>
+  </main>
+  <footer>Files go straight from one browser to the other through this server and are never stored.</footer>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script>
+'use strict';
+(function () {
+  const CHUNK = 256 * 1024;              // bytes per binary message
+  const MAX_BUFFERED = 4 * 1024 * 1024;  // WebSocket send buffer limit
+  const MAX_INFLIGHT = 16 * 1024 * 1024; // sent but not yet acknowledged
+  const ACK_EVERY = 1024 * 1024;
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  let ws = null, session = null, peerConnected = false, joinUrl = '';
+  let intentionalClose = false, reconnectDelay = 800;
+  let nextId = 1;
+  let peerEpoch = 0;          // bumps per peer connection; ids are only unique per sender page
+  const outgoing = new Map(); // id -> transfer we send
+  const incoming = new Map(); // "epoch:id" -> transfer we receive
+  const inKey = (id) => peerEpoch + ':' + (id >>> 0);
+  const sendQueue = [];
+  let pumping = false;
+
+  // ---------- utils ----------
+  function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    const u = ['KB', 'MB', 'GB', 'TB']; let i = -1;
+    do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+    return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
+  }
+  function ext(name) {
+    const m = /\.([a-z0-9]{1,5})$/i.exec(name || '');
+    return m ? m[1] : 'file';
+  }
+  const EXT_COLORS = { jpg: '#ff7a59', jpeg: '#ff7a59', png: '#ff7a59', gif: '#ff7a59', webp: '#ff7a59', heic: '#ff7a59', svg: '#ff7a59',
+    mp4: '#e64980', mov: '#e64980', mkv: '#e64980', webm: '#e64980', mp3: '#be4bdb', wav: '#be4bdb', m4a: '#be4bdb', flac: '#be4bdb',
+    pdf: '#f03e3e', zip: '#f59f00', rar: '#f59f00', '7z': '#f59f00', gz: '#f59f00', tar: '#f59f00',
+    doc: '#4c6ef5', docx: '#4c6ef5', txt: '#4c6ef5', md: '#4c6ef5', xls: '#2f9e44', xlsx: '#2f9e44', csv: '#2f9e44', ppt: '#e8590c', pptx: '#e8590c', apk: '#37b24d' };
+  function deviceName() {
+    const ua = navigator.userAgent;
+    if (/iPhone/.test(ua)) return 'iPhone';
+    if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'iPad';
+    if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'Android phone' : 'Android tablet';
+    if (/CrOS/.test(ua)) return 'Chromebook';
+    if (/Windows/.test(ua)) return 'Windows PC';
+    if (/Mac OS X/.test(ua)) return 'Mac';
+    if (/Linux/.test(ua)) return 'Linux computer';
+    return 'Device';
+  }
+  function toast(msg, isErr) {
+    const t = el('div', 'toast' + (isErr ? ' err' : ''), msg);
+    $('toasts').appendChild(t);
+    setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3800);
+  }
+  function setPill(cls, text) { $('pill').className = 'pill ' + cls; $('pillText').textContent = text; }
+  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  // ---------- connection ----------
+  function connect(code) {
+    intentionalClose = false;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const sock = new WebSocket(proto + '//' + location.host + '/ws' + (code ? '?s=' + encodeURIComponent(code) : ''));
+    sock.binaryType = 'arraybuffer';
+    ws = sock;
+    setPill('wait', code ? 'Joining…' : 'Connecting…');
+    sock.onmessage = (e) => {
+      if (sock !== ws) return;
+      if (typeof e.data === 'string') {
+        let msg; try { msg = JSON.parse(e.data); } catch (_) { return; }
+        onMessage(msg);
+      } else onBinary(e.data);
+    };
+    sock.onopen = () => { reconnectDelay = 800; };
+    sock.onclose = () => {
+      if (sock !== ws) return;
+      setPeer(false);
+      failActive('Connection lost');
+      if (intentionalClose) return;
+      setPill('off', 'Reconnecting…');
+      setTimeout(() => { if (ws === sock) connect(session); }, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+    };
+  }
+
+  function leave(newCode) {
+    intentionalClose = true;
+    const old = ws; ws = null;
+    if (old) old.close();
+    setPeer(false);
+    failActive('Disconnected');
+    connect(newCode || null);
+  }
+
+  function onMessage(m) {
+    switch (m.type) {
+      case 'hello':
+        session = m.session; joinUrl = m.url;
+        $('code').textContent = session; $('code2').textContent = session;
+        $('link').textContent = joinUrl;
+        $('qr').onload = () => { $('qrSpin').hidden = true; };
+        $('qr').src = '/qr.svg?d=' + encodeURIComponent(joinUrl);
+        history.replaceState(null, '', '?s=' + session);
+        if (!peerConnected) setPill('wait', 'Waiting for device');
+        break;
+      case 'peer':
+        if (m.connected) peerEpoch++;
+        setPeer(!!m.connected);
+        if (m.connected) { send({ type: 'info', name: deviceName() }); toast('Device connected'); }
+        else { failActive('Other device disconnected'); toast('Device disconnected', true); }
+        break;
+      case 'error':
+        // Unknown or full session: start a fresh one instead
+        intentionalClose = true;
+        toast(m.message || 'Error', true);
+        session = null;
+        history.replaceState(null, '', location.pathname);
+        setTimeout(() => connect(null), 100);
+        break;
+      case 'info': $('peerName').textContent = String(m.name || 'Device').slice(0, 40); break;
+      case 'offer': addIncoming(m); break;
+      case 'accept': onAccepted(m.id); break;
+      case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') { t.state = 'declined'; renderOut(t); } break; }
+      case 'cancel': onCancel(m); break;
+      case 'ack': { const t = outgoing.get(m.id); if (t) { t.acked = m.bytes; renderOut(t); } break; }
+      case 'eof': onEof(m.id); break;
+      case 'done': { const t = outgoing.get(m.id); if (t) { t.acked = t.size; t.state = 'done'; renderOut(t); } break; }
+    }
+  }
+
+  function setPeer(on) {
+    peerConnected = on;
+    document.body.classList.toggle('connected', on);
+    if (on) setPill('on', 'Connected');
+    else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
+    if (!on) $('peerName').textContent = 'Device';
+  }
+
+  function failActive(reason) {
+    for (const t of outgoing.values())
+      if (['offered', 'sending', 'finishing'].includes(t.state)) { t.state = 'failed'; t.error = reason; renderOut(t); }
+    for (const t of incoming.values())
+      if (['offered', 'saving', 'receiving'].includes(t.state)) { abortWriter(t); t.state = 'failed'; t.error = reason; renderIn(t); }
+    sendQueue.length = 0;
+  }
+
+  // ---------- sending ----------
+  function offerFiles(files) {
+    if (!peerConnected) { toast('Connect a device first', true); return; }
+    for (const file of files) {
+      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0 };
+      outgoing.set(t.id, t);
+      createRow(t, false);
+      renderOut(t);
+      send({ type: 'offer', id: t.id, name: file.name, size: file.size, mime: file.type || '' });
+    }
+  }
+
+  function onAccepted(id) {
+    const t = outgoing.get(id);
+    if (!t || t.state !== 'offered') return;
+    t.state = 'sending'; t.started = performance.now();
+    renderOut(t);
+    sendQueue.push(t);
+    pump();
+  }
+
+  async function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (sendQueue.length) {
+        const t = sendQueue[0];
+        const sock = ws;
+        while (t.state === 'sending' && t.sent < t.size) {
+          if (!sock || sock.readyState !== 1 || sock !== ws) return;
+          if (sock.bufferedAmount > MAX_BUFFERED || t.sent - t.acked > MAX_INFLIGHT) { await sleep(10); continue; }
+          const end = Math.min(t.sent + CHUNK, t.size);
+          let buf;
+          try { buf = await t.file.slice(t.sent, end).arrayBuffer(); }
+          catch (e) { t.state = 'failed'; t.error = 'Could not read file'; send({ type: 'cancel', id: t.id, from: 'sender' }); break; }
+          if (t.state !== 'sending' || sock !== ws) break;
+          const frame = new Uint8Array(4 + buf.byteLength);
+          new DataView(frame.buffer).setUint32(0, t.id);
+          frame.set(new Uint8Array(buf), 4);
+          sock.send(frame);
+          t.sent = end;
+          renderOut(t);
+        }
+        if (t.state === 'sending') { send({ type: 'eof', id: t.id }); t.state = 'finishing'; }
+        renderOut(t);
+        sendQueue.shift();
+      }
+    } finally { pumping = false; }
+  }
+
+  function cancelOutgoing(t) {
+    if (!['offered', 'sending', 'finishing'].includes(t.state)) return;
+    t.state = 'cancelled';
+    send({ type: 'cancel', id: t.id, from: 'sender' });
+    renderOut(t);
+  }
+
+  // ---------- receiving ----------
+  function addIncoming(m) {
+    const id = m.id >>> 0;
+    if (incoming.has(inKey(id))) return;
+    const t = { id, name: String(m.name || 'file').slice(0, 255), size: Math.max(0, +m.size || 0), mime: String(m.mime || ''),
+                received: 0, lastAck: 0, state: 'offered', writer: null, chunks: null, chain: Promise.resolve(), started: 0 };
+    incoming.set(inKey(id), t);
+    createRow(t, true);
+    renderIn(t);
+    if (document.hidden && 'vibrate' in navigator) try { navigator.vibrate(80); } catch (_) {}
+  }
+
+  async function acceptIncoming(t) {
+    if (t.state !== 'offered') return;
+    t.state = 'saving'; renderIn(t);
+    let writer = null;
+    if (typeof window.showSaveFilePicker === 'function') {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: t.name });
+        writer = await handle.createWritable();
+      } catch (e) {
+        if (e && e.name === 'AbortError') { if (t.state === 'saving') { t.state = 'offered'; renderIn(t); } return; }
+        writer = null; // picker unsupported here: fall back to an in-browser download
+      }
+    }
+    if (t.state !== 'saving') { if (writer) writer.abort().catch(() => {}); return; }
+    t.writer = writer;
+    t.chunks = writer ? null : [];
+    t.state = 'receiving'; t.started = performance.now();
+    send({ type: 'accept', id: t.id });
+    renderIn(t);
+  }
+
+  function declineIncoming(t) {
+    if (t.state === 'offered' || t.state === 'saving') { t.state = 'declined'; send({ type: 'decline', id: t.id }); renderIn(t); }
+    else if (t.state === 'receiving') { abortWriter(t); t.state = 'cancelled'; send({ type: 'cancel', id: t.id, from: 'receiver' }); renderIn(t); }
+  }
+
+  function abortWriter(t) {
+    if (t.writer) { const w = t.writer; t.writer = null; t.chain.then(() => w.abort()).catch(() => {}); }
+    t.chunks = null;
+  }
+
+  function ack(t, bytes) {
+    if (bytes - t.lastAck >= ACK_EVERY || bytes === t.size) { t.lastAck = bytes; send({ type: 'ack', id: t.id, bytes }); }
+  }
+
+  function onBinary(buf) {
+    if (buf.byteLength < 4) return;
+    const t = incoming.get(inKey(new DataView(buf).getUint32(0)));
+    if (!t || t.state !== 'receiving') return;
+    const data = new Uint8Array(buf, 4);
+    t.received += data.byteLength;
+    const got = t.received;
+    if (t.received > t.size) { fail(t, 'Received more data than announced'); return; }
+    if (t.writer) {
+      const w = t.writer;
+      t.chain = t.chain.then(() => w.write(data)).then(() => ack(t, got));
+      t.chain.catch(() => fail(t, 'Could not write file'));
+    } else {
+      t.chunks.push(data);
+      ack(t, got);
+    }
+    renderIn(t);
+  }
+
+  function fail(t, reason) {
+    if (t.state !== 'receiving') return;
+    abortWriter(t);
+    t.state = 'failed'; t.error = reason;
+    send({ type: 'cancel', id: t.id, from: 'receiver' });
+    renderIn(t);
+  }
+
+  function onEof(id) {
+    const t = incoming.get(inKey(id));
+    if (!t || t.state !== 'receiving') return;
+    t.chain.then(async () => {
+      if (t.state !== 'receiving') return;
+      if (t.received !== t.size) { fail(t, 'Transfer incomplete'); return; }
+      if (t.writer) { await t.writer.close(); t.writer = null; }
+      else {
+        const blob = new Blob(t.chunks, { type: t.mime || 'application/octet-stream' });
+        t.chunks = null;
+        t.url = URL.createObjectURL(blob);
+        download(t);
+      }
+      t.state = 'done';
+      ack(t, t.size);
+      send({ type: 'done', id: t.id });
+      renderIn(t);
+    }).catch(() => fail(t, 'Could not save file'));
+  }
+
+  function download(t) {
+    const a = el('a'); a.href = t.url; a.download = t.name; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+
+  function onCancel(m) {
+    if (m.from === 'sender') {
+      const t = incoming.get(inKey(m.id));
+      if (t && ['offered', 'saving', 'receiving'].includes(t.state)) { abortWriter(t); t.state = 'cancelled'; renderIn(t); }
+    } else {
+      const t = outgoing.get(m.id);
+      if (t && ['offered', 'sending', 'finishing'].includes(t.state)) { t.state = 'cancelled'; renderOut(t); }
+    }
+  }
+
+  // ---------- rendering ----------
+  function createRow(t, isIn) {
+    const list = $(isIn ? 'inList' : 'outList');
+    const empty = list.querySelector('.empty'); if (empty) empty.remove();
+    const row = el('div', 'item ' + (isIn ? 'incoming' : 'outgoing'));
+    const e = ext(t.name);
+    const icon = el('div', 'ficon', e.slice(0, 4));
+    if (EXT_COLORS[e.toLowerCase()]) icon.style.background = EXT_COLORS[e.toLowerCase()];
+    const meta = el('div', 'meta');
+    const name = el('div', 'name', t.name); name.title = t.name;
+    const status = el('div', 'status');
+    const bar = el('div', 'bar'); const fill = el('i'); bar.appendChild(fill);
+    meta.append(name, status, bar);
+    const actions = el('div', 'actions');
+    row.append(icon, meta, actions);
+    row.dataset.id = t.id;
+    t.ui = { row, status, fill, actions, sig: '' };
+    list.prepend(row);
+  }
+
+  function speed(t, bytes) {
+    const s = (performance.now() - t.started) / 1000;
+    return s > 0.3 ? fmtSize(bytes / s) + '/s' : '';
+  }
+
+  function setStatus(t, parts, cls) {
+    const s = t.ui.status; s.textContent = '';
+    parts.filter(Boolean).forEach((p, i) => { const sp = el('span', i === 0 && cls ? cls : '', p); s.appendChild(sp); });
+  }
+
+  function setActions(t, sig, build) {
+    if (t.ui.sig === sig) return;  // avoid rebuilding buttons on every progress tick
+    t.ui.sig = sig; t.ui.actions.textContent = ''; build(t.ui.actions);
+  }
+
+  function btn(label, cls, fn) { const b = el('button', 'btn small ' + cls, label); b.type = 'button'; b.onclick = fn; return b; }
+
+  let renderPending = new Set(), rafScheduled = false;
+  function schedule(t, fn) {
+    renderPending.add(() => fn(t));
+    if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(() => { rafScheduled = false; const p = renderPending; renderPending = new Set(); p.forEach((f) => f()); updateAcceptAll(); }); }
+  }
+  const renderOut = (t) => schedule(t, drawOut);
+  const renderIn = (t) => schedule(t, drawIn);
+
+  function drawOut(t) {
+    t.ui.row.className = 'item outgoing ' + t.state;
+    const pct = t.size ? Math.min(100, t.acked / t.size * 100) : (t.state === 'done' ? 100 : 0);
+    t.ui.fill.style.width = pct + '%';
+    const size = fmtSize(t.size);
+    switch (t.state) {
+      case 'offered': setStatus(t, ['Waiting for the other device to accept', size]); break;
+      case 'sending': case 'finishing': setStatus(t, [Math.floor(pct) + '%', fmtSize(t.acked) + ' of ' + size, speed(t, t.acked)]); break;
+      case 'done': setStatus(t, ['Sent', size], 'st-done'); break;
+      case 'declined': setStatus(t, ['Declined', size], 'st-err'); break;
+      case 'cancelled': setStatus(t, ['Cancelled', size], 'st-err'); break;
+      case 'failed': setStatus(t, [t.error || 'Failed', size], 'st-err'); break;
+    }
+    const active = ['offered', 'sending', 'finishing'].includes(t.state);
+    setActions(t, active ? 'cancel' : 'none', (a) => { if (active) a.append(btn('Cancel', 'ghost', () => cancelOutgoing(t))); });
+  }
+
+  function drawIn(t) {
+    t.ui.row.className = 'item incoming ' + t.state;
+    const pct = t.size ? Math.min(100, t.received / t.size * 100) : (t.state === 'done' ? 100 : 0);
+    t.ui.fill.style.width = pct + '%';
+    const size = fmtSize(t.size);
+    switch (t.state) {
+      case 'offered': setStatus(t, ['Wants to send you', size]); break;
+      case 'saving': setStatus(t, ['Choose where to save…', size]); break;
+      case 'receiving': setStatus(t, [Math.floor(pct) + '%', fmtSize(t.received) + ' of ' + size, speed(t, t.received)]); break;
+      case 'done': setStatus(t, ['Received', size], 'st-done'); break;
+      case 'declined': setStatus(t, ['Declined', size], 'st-err'); break;
+      case 'cancelled': setStatus(t, ['Cancelled', size], 'st-err'); break;
+      case 'failed': setStatus(t, [t.error || 'Failed', size], 'st-err'); break;
+    }
+    const sig = t.state + (t.url ? ':url' : '');
+    setActions(t, sig, (a) => {
+      if (t.state === 'offered') a.append(btn('Decline', 'ghost', () => declineIncoming(t)), btn('Accept', 'primary', () => acceptIncoming(t)));
+      else if (t.state === 'receiving') a.append(btn('Cancel', 'ghost', () => declineIncoming(t)));
+      else if (t.state === 'done' && t.url) a.append(btn('Save again', 'ghost', () => download(t)));
+    });
+  }
+
+  function updateAcceptAll() {
+    let n = 0; for (const t of incoming.values()) if (t.state === 'offered') n++;
+    // "Accept all" only makes sense when no save dialog is needed per file
+    $('acceptAll').hidden = n < 2 || typeof window.showSaveFilePicker === 'function';
+  }
+
+  // ---------- UI wiring ----------
+  $('fileInput').addEventListener('change', (e) => { offerFiles(Array.from(e.target.files || [])); e.target.value = ''; });
+  const drop = $('drop');
+  ['dragenter', 'dragover'].forEach((ev) => window.addEventListener(ev, (e) => { e.preventDefault(); if (peerConnected) drop.classList.add('over'); }));
+  ['dragleave', 'dragend'].forEach((ev) => window.addEventListener(ev, (e) => { if (!e.relatedTarget) drop.classList.remove('over'); }));
+  window.addEventListener('drop', (e) => {
+    e.preventDefault(); drop.classList.remove('over');
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (files.length) offerFiles(files);
+  });
+  $('acceptAll').addEventListener('click', () => { for (const t of incoming.values()) if (t.state === 'offered') acceptIncoming(t); });
+  $('copyBtn').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(joinUrl); toast('Link copied'); }
+    catch (_) {
+      const r = document.createRange(); r.selectNodeContents($('link'));
+      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      toast('Link selected — copy it manually');
+    }
+  });
+  $('joinForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const code = $('joinCode').value.trim().toUpperCase();
+    if (!/^[A-Z0-9]{4,12}$/.test(code)) { toast('Enter a valid session code', true); return; }
+    if (code === session) { toast('That is this session’s own code', true); return; }
+    $('joinCode').value = '';
+    leave(code);
+  });
+  $('leaveBtn').addEventListener('click', () => { history.replaceState(null, '', location.pathname); leave(null); });
+  window.addEventListener('beforeunload', (e) => {
+    const busy = [...outgoing.values(), ...incoming.values()].some((t) => ['sending', 'receiving', 'finishing'].includes(t.state));
+    if (busy) { e.preventDefault(); e.returnValue = ''; }
+  });
+  // Phones suspend sockets in the background; reconnect promptly on return.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && (!ws || ws.readyState > 1) && !intentionalClose) { reconnectDelay = 800; connect(session); }
+  });
+
+  // expose a tiny hook for automated tests
+  window.ezxfer = { get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; } };
+
+  const initial = new URLSearchParams(location.search).get('s');
+  connect(initial ? initial.toUpperCase() : null);
+})();
+</script>
+</body>
+</html>

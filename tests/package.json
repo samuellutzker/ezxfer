@@ -1,0 +1,10 @@
+{
+  "name": "ezxfer-tests",
+  "private": true,
+  "description": "Test-only dependencies for the end-to-end browser tests",
+  "type": "module",
+  "devDependencies": {
+    "jsqr": "1.4.0",
+    "playwright": "^1.56.1"
+  }
+}

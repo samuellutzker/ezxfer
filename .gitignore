@@ -1,0 +1,4 @@
+ezxfer
+build/
+tests/node_modules/
+__pycache__/
