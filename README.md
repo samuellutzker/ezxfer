@@ -141,6 +141,8 @@ The join URL uses the address the page was opened with. If that was `localhost`,
 
 ## Layout
 
+For how the pieces fit together, see the [developer guide](docs/DEVELOPMENT.md).
+
 ```
 src/main.c      command line parsing
 src/server.c    poll() event loop, HTTP routes, sessions, WebSocket relay
@@ -152,7 +154,7 @@ web/index.html  the page (HTML, CSS and JavaScript in one file)
 web/sw.js       service worker that streams received files into downloads
 tools/embed.c   turns the web files into C headers at build time
 tests/          unit, QR reference, integration and browser tests
-docs/           screenshots
+docs/           developer guide, screenshots
 ```
 
 ## Tests
