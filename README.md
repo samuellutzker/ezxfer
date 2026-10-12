@@ -10,11 +10,8 @@ Send files between a computer and a phone, or any two devices, right from the br
 
 - **Pair by QR code** or by typing a 6-character session code.
 - **Both directions:** each device can send. Files show up on the other side with Accept / Decline.
-- **Large files:** data streams straight through and is never stored. Desktop Chrome/Edge and Android write files to disk as they arrive, over HTTPS or on the computer running ezxfer.
-- **Robust on phones:**
-  - transfers resume after a dropped connection;
-  - the screen stays on while transferring;
-  - the other device sees "Choosing files…" instead of a disconnect while a file picker is open.
+- **Large files:** data streams straight through and is never stored.
+- **Robust on phones:** transfers resume after a dropped connection, and the screen stays on while transferring.
 - **Optional HTTPS** with your own certificate.
 - **A single small C program:** the web app is built in. It needs no dependencies, or only OpenSSL if you want HTTPS.
 - Responsive, with light and dark themes.
@@ -60,12 +57,7 @@ Options:
 ./ezxfer --cert cert.pem --key key.pem
 ```
 
-HTTPS encrypts transfers and unlocks browser features:
-- streaming large downloads to disk on Android;
-- keeping the screen on;
-- the "Save as" dialog on desktop Chrome/Edge when they open the page from another machine.
-
-Plain `http://` requests to the same port are redirected.
+HTTPS encrypts transfers and lets phones stream large downloads to disk and keep the screen on. Plain `http://` requests to the same port are redirected.
 
 Phones need to **trust** the certificate. Otherwise some browsers refuse the connection or the streamed downloads. The easiest way is [mkcert](https://github.com/FiloSottile/mkcert): install its root certificate on the phone once, then create a certificate for your computer's LAN address:
 
@@ -77,7 +69,6 @@ Behind a reverse proxy that handles TLS (Caddy, nginx), run ezxfer without a cer
 
 ## Good to know
 
-- Files are relayed by the server, never stored, and transfers are only as fast as the network.
 - Anyone with the session code can join while a slot is free. A session holds two devices.
 - Without HTTPS, and on iPhones and iPads, a received file is held in memory until it's complete. That's fine for photos and videos, but files of several GB may exceed what a phone browser allows.
 - Reloading the page cancels its running transfers.
