@@ -27,6 +27,9 @@ How the code fits together, and what to know before changing it. User-facing doc
 | `src/qr.c` | QR encoder (byte mode, versions 1–40) + SVG |
 | `web/index.html` | The whole app: HTML, CSS and one IIFE script |
 | `web/sw.js` | Service worker for streamed downloads |
+| `tools/embed.c` | Turns a file into a C byte array at build time |
+| `tests/` | Unit, QR reference, integration and browser tests (see [Tests](#tests)) |
+| `docs/` | This guide and the README screenshots |
 
 ## Server (`src/server.c`)
 
@@ -59,11 +62,49 @@ All socket I/O goes through `io_read()` / `io_write()`, which hide plain versus 
 - `?c=<client id>` identifies the page. A join whose client id matches an occupied slot **replaces** that connection (closed with 4001), because the device reconnected before the server noticed the old connection died.
 - An empty session is kept for `--session-timeout` seconds, so devices can come back.
 
+**Join URL.** `public_origin()` builds the URL in `hello` and in the QR code:
+- `--url`, if given;
+- otherwise the request's `Host` header, if it looks like a host name (`plausible_host()`);
+- otherwise the machine's LAN address from `lan_address()`, which prefers 192.168/16, then 10/8, then 172.16/12. That also applies when the page was opened via `localhost`.
+
+**HTTPS.** HTTPS is enabled by `--cert` (a PEM certificate or chain, leaf first) and `--key`, which defaults to the certificate file. The server accepts TLS 1.2 or newer. A plain request on the TLS port gets a redirect.
+
+For trying HTTPS by hand without mkcert, use a self-signed certificate:
+
+```sh
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 365 \
+  -subj /CN=ezxfer -addext "subjectAltName=IP:192.168.1.20,DNS:localhost" \
+  -keyout key.pem -out cert.pem
+```
+
+Browsers make you click through a warning for it. They also behave differently with a certificate they don't trust:
+- Safari may still refuse the WebSocket;
+- Chrome won't register the service worker, so Android falls back to the in-memory download.
+
 **Build id.** The server hashes (FNV-1a) the served page and service worker at startup. `{{VERSION}}` and `{{BUILD}}` are substituted once, in `render_page()`. `hello` carries the build id; a page with a different one reloads itself. That's why a page left open across an upgrade never speaks an old protocol.
 
 ## Protocol
 
-The server-sent messages and the full list of message types are in the README's *Protocol* section. The flows:
+The server relays everything between the two devices. It only looks at the messages it sends or answers itself.
+
+- **From the server:**
+  - `hello {session, url, version, build}`
+  - `peer {connected, id}`
+  - `error {code, message}` (`not_found`, `full`, `busy`)
+  - `pong`, the reply to the page's `{"type":"ping"}`
+- **Between the devices** (JSON text):
+  - `info {name, instance}`
+  - `picking {active, what}` (`what` is `open` or `save`)
+  - `offer {id, name, size, mime}`
+  - `accept {id, offset}`
+  - `decline {id}`
+  - `cancel {id, from}` (`from` is `sender` or `receiver`)
+  - `ack {id, bytes}`
+  - `eof {id}`
+  - `done {id}`
+- **File data:** binary messages, see below.
+
+The flows:
 
 ```
 sender                         receiver
@@ -77,15 +118,17 @@ eof {id}                   ─▶  verify size, finish, done {id}
 - **Binary messages** are a 12-byte big-endian header (`u32` id, `u64` offset) plus up to 1 MB of data. The receiver ignores any chunk whose offset isn't exactly the number of bytes it has received.
 - **Resume:** when the same device (same client id) reconnects, each side replays what may have been lost: offers, cancels, declines and dones. The receiver sends `accept {offset: bytes received}`, and the sender continues from there. Leftover data from before the drop fails the offset check and is dropped.
 - **`info {instance}`** tells a reloaded peer page apart from a reconnected one. Transfers with a reloaded page fail, since its files and partial downloads are gone.
-- **`picking {active, what}`:** a file picker (`open`) or save-location prompt (`save`) is open. A connection drop during it isn't reported, for up to 2 minutes.
+- **`picking {active, what}`:** a file picker (`open`) or save-location prompt (`save`) is open. The other device shows "Choosing files…" or "Choosing where to save…". A connection drop meanwhile isn't reported for up to 2 minutes (`PICK_GRACE`); any other drop is reported right away.
 
 ## Page (`web/index.html`)
 
 It's one IIFE, in sections marked `// ---------- name ----------`.
 
 **Connection.**
-- `connect()` / `socketLost()`: reconnect with backoff to the same session.
-- `wakeUp()`: on returning to the page, reconnect or run `checkAlive()`. That's a `ping` the server answers, used to detect silently dead sockets.
+- `connect()` / `socketLost()`: reconnect with backoff to the same session. Running transfers pause meanwhile.
+- `wakeUp()`: on returning to the page (visibility, focus, `pageshow`), reconnect or run `checkAlive()`. That's a `ping` the server answers; a socket without an answer within 3 s is replaced. There's also a check after 15 s of silence.
+- The client id lives in `sessionStorage`, so a tab the phone reloads gets its session slot back. Transfer ids start at a random value, so a reloaded page can't collide with ids the peer remembers.
+- Files picked while disconnected are offered once the peer is back.
 - `onMessage()` dispatches every JSON message.
 
 **Transfers** are plain objects in `outgoing` (by id) and `incoming` (by `peerId:id`). Their states:
@@ -103,9 +146,9 @@ incoming: offered ─▶ saving ─▶ receiving ─▶ done
 
 **Receiving.** `acceptIncoming()` picks a writer. All three have the same `write/close/abort` interface:
 
-1. `showSaveFilePicker()`: desktop Chrome/Edge, in a secure context;
-2. `streamWriter()`: the service worker, on a secure context that isn't iOS;
-3. none: chunks collected in memory, then saved with `download()`.
+1. `showSaveFilePicker()`: desktop Chrome/Edge, in a secure context (HTTPS or `localhost`);
+2. `streamWriter()`: the service worker, in a secure context that isn't iOS. That means Android and desktop Firefox. iOS is excluded because WebKit doesn't reliably turn such a stream into a download, and a transfer that "completes" without a file would be worse than holding it in memory. If the download doesn't start within 5 s, the page falls back to 3.
+3. none: chunks collected in memory, then saved with `download()`. Very large files can exceed what a phone browser allows.
 
 Writes are chained on `t.chain`; acks are sent after each write.
 
@@ -115,7 +158,11 @@ Writes are chained on `t.chain`; acks are sent after each write.
 
 **Other parts:**
 - `updateWakeLock()` keeps the screen on while transfers are busy.
-- `setPicking()` / `setPeerPicking()` implement the "Choosing files…" and "Choosing where to save…" status.
+- `setPicking()` / `setPeerPicking()` implement the "Choosing files…" and "Choosing where to save…" status:
+  - **Start:** the file input's `click`, the desktop save dialog, or the start of a download. On Android, Chrome may ask for a save location there, depending on its settings.
+  - **End:** `change` or `cancel`, or focus returning after the picker took it away.
+  - **Download prompts:** the page can't know whether one will appear, so `maybeChoosingSaveLocation()` withdraws the announcement after 3 s unless the page was left.
+- `updateWakeLock()`: the Wake Lock API needs a secure context. Elsewhere, touch devices get a "keep this screen on" hint instead.
 - `window.ezxfer` exposes state and fault injection (`dropConnection`, `freezeConnection`) **for the tests only**.
 
 ## Tests
@@ -131,7 +178,32 @@ make test   # everything; the TLS suites too when built with TLS
 | `tests/test_integration.py` | Python stdlib | Black-box HTTP/WebSocket against the binary; `--tls` runs it over verified TLS |
 | `tests/e2e.mjs` | Playwright | Desktop page + emulated iPhone + Android, real transfers; `--tls` too |
 
-Test-only dependencies: `pip install qrcode`, `cd tests && npm install`, and the `openssl` CLI. Useful patterns already used in the suites:
+Test-only dependencies: `pip install qrcode`, `cd tests && npm install`, and the `openssl` CLI.
+
+What the suites cover, beyond the basics:
+- **Unit:**
+  - SHA-1/Base64 vectors, the RFC 6455 examples and all frame-length encodings;
+  - unmasking checked against the byte-wise definition at every length and alignment;
+  - HTTP and query parsing, the QR capacity table and structure.
+- **QR:** about 190 symbols across versions 1–40, all ECC levels and masks, matched module for module against python-qrcode and decoded by jsQR.
+- **Integration** (plain and `--tls`):
+  - routes and errors;
+  - sessions: join, full, not found, client-id takeover, empty-session timeout;
+  - relay of text, binary and fragmented messages, and protocol violations;
+  - a 64 MB transfer, and backpressure keeping server memory flat;
+  - `ping`/`pong`, the build id, the Host-header check and command-line options.
+  - **TLS only:** the redirect, untrusted clients, garbage and abandoned handshakes, combined and invalid PEM files.
+- **E2E** (plain and `--tls`):
+  - QR scan → join; transfers both ways on every save path, with byte-for-byte checks;
+  - empty files, multiple files, decline and cancel;
+  - streamed downloads on Android;
+  - resume after the sender or the receiver drops;
+  - choosing files and save locations versus real disconnects;
+  - dead-connection detection, phone reloads, unreadable files;
+  - wake lock, background-tab throttling;
+  - session full or stale, server upgrade and restart, layout.
+
+Useful patterns already used in the suites:
 
 - **Simulating a phone:**
   - `phoneCtx.setOffline(true)` stops a page from reconnecting;
@@ -147,7 +219,7 @@ Servers started by the tests run with `--quiet`. To debug the server, run it you
 
 ## Changing things
 
-- **New message type:** handle it in `onMessage()`, and add it to the README's protocol list. The server needs no change unless the server itself must answer.
+- **New message type:** handle it in `onMessage()`, and add it to the [protocol list](#protocol). The server needs no change unless the server itself must answer.
 - **Binary format or other protocol changes:** both devices always run the same page, thanks to the build id. Old pages reload themselves, so there's no compatibility code to write.
 - **Anything a reconnect might lose:** decide what `resumeWithPeer()` must replay, and make the receiving side idempotent: duplicate offers, cancels and dones must be ignored.
 - **Server changes:** keep `proto.c` free of I/O and unit-test it there. Run the integration suite against an ASan build too:
