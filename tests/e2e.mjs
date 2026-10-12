@@ -62,7 +62,9 @@ function watch(page, label) {
 // Simulates the File System Access API save dialog, collecting written bytes.
 const mockSavePicker = () => {
   window.__saved = {};
-  window.showSaveFilePicker = async ({ suggestedName }) => ({
+  window.showSaveFilePicker = async ({ suggestedName }) => {
+    if (window.__pickerDelay) await new Promise((r) => setTimeout(r, window.__pickerDelay));  // user choosing a place
+    return {
     createWritable: async () => {
       const parts = [];
       return {
@@ -77,7 +79,7 @@ const mockSavePicker = () => {
         abort: async () => { window.__saved[suggestedName] = 'aborted'; },
       };
     },
-  });
+  }; };
 };
 
 // Records Screen Wake Lock requests/releases.
@@ -344,6 +346,45 @@ try {
   await B.waitForFunction(() => document.body.classList.contains('connected'));
   await A.waitForFunction(() => document.body.classList.contains('connected'));
   ok('connection lost otherwise is reported as a disconnect');
+
+  // ---------- choosing where to save is announced too ----------
+  // desktop: its "Save as" dialog is open for a while
+  await A.evaluate(() => { window.__pickerDelay = 2000; });
+  await B.setInputFiles('#fileInput', { name: 'save-as.txt', mimeType: 'text/plain', buffer: Buffer.from('where to?') });
+  await row(A, 'inList', 'save-as.txt').getByRole('button', { name: 'Accept' }).click();
+  await B.waitForFunction(() => document.getElementById('pillText').textContent === 'Choosing where to save…');
+  await A.waitForFunction(() => window.__saved['save-as.txt']);
+  await B.waitForFunction(() => document.getElementById('pillText').textContent === 'Connected');
+  await A.evaluate(() => { window.__pickerDelay = 0; });
+  ok('desktop "Save as" dialog shows as "Choosing where to save…" on the phone');
+
+  // phone: starting the download makes Chrome ask where to save, which leaves the
+  // page; the connection drops meanwhile and must not be reported
+  await A.waitForFunction(() => !document.querySelector('.toast'), null, { timeout: 8000 });  // earlier ones gone
+  const toastsBefore = 0;
+  await A.setInputFiles('#fileInput', { name: 'to-phone.pdf', mimeType: 'application/pdf', buffer: randomBytes(100000) });
+  await row(B, 'inList', 'to-phone.pdf').getByRole('button', { name: 'Accept' }).click();
+  await A.waitForFunction(() => document.getElementById('pillText').textContent === 'Choosing where to save…');
+  await B.evaluate(() => window.dispatchEvent(new Event('blur')));  // the save prompt takes over
+  await phoneCtx.setOffline(true);
+  await B.evaluate(() => window.ezxfer.dropConnection(false));
+  await A.waitForFunction(() => !window.ezxfer.connected);
+  await new Promise((r) => setTimeout(r, 4000));  // longer than the 3 s withdrawal
+  assert((await A.textContent('#pillText')) === 'Choosing where to save…', 'still choosing where to save');
+  assert(await A.evaluate(() => document.body.classList.contains('connected')), 'stays on the transfer screen');
+  assert((await A.locator('.toast', { hasText: 'disconnected' }).count()) === toastsBefore, 'no disconnect message');
+  await phoneCtx.setOffline(false);
+  await B.evaluate(() => window.dispatchEvent(new Event('focus')));  // back from the prompt
+  await A.waitForFunction(() => window.ezxfer.connected && document.getElementById('pillText').textContent === 'Connected');
+  await row(A, 'outList', 'to-phone.pdf').locator('.st-done').waitFor();
+  ok('phone choosing a save location: connection loss shows as "Choosing where to save…", not a disconnect');
+
+  // without a prompt (page not left), the announcement is withdrawn after 3 s
+  await A.setInputFiles('#fileInput', { name: 'no-prompt.txt', mimeType: 'text/plain', buffer: Buffer.from('x') });
+  await row(B, 'inList', 'no-prompt.txt').getByRole('button', { name: 'Accept' }).click();
+  await A.waitForFunction(() => document.getElementById('pillText').textContent === 'Choosing where to save…');
+  await A.waitForFunction(() => document.getElementById('pillText').textContent === 'Connected', null, { timeout: 6000 });
+  ok('no save prompt: "Choosing where to save…" is withdrawn after a few seconds');
 
   // ---------- files picked while the connection is down are not lost ----------
   // (phones often lose the connection while their file picker is open)

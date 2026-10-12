@@ -428,7 +428,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
             // Phones usually lose the connection while their file picker is open.
             // That's not the device going away: keep the transfer screen and wait.
             peerConnected = false;
-            setPill('wait', 'Choosing files…');
+            setPill('wait', peerPickLabel);
             pickGrace = setTimeout(() => {
               setPeerPicking(false); setPeer(false);
               toast('Device disconnected — waiting for it to come back', true);
@@ -439,7 +439,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           }
         }
         break;
-      case 'picking': setPeerPicking(!!m.active); break;
+      case 'picking': setPeerPicking(!!m.active, m.what); break;
       case 'error':
         // Unknown, expired or full session: start a fresh one instead
         intentionalClose = true;
@@ -473,16 +473,18 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   // the device stays away longer than PICK_GRACE.
   const PICK_GRACE = 120000;
   let peerPicking = false, pickGrace = null;
-  function setPeerPicking(on) {
+  let peerPickLabel = 'Choosing files…';
+  function setPeerPicking(on, what) {
     peerPicking = on;
+    if (on) peerPickLabel = what === 'save' ? 'Choosing where to save…' : 'Choosing files…';
     clearTimeout(pickGrace); pickGrace = null;
-    if (peerConnected) setPill('on', on ? 'Choosing files…' : 'Connected');
+    if (peerConnected) setPill('on', on ? peerPickLabel : 'Connected');
   }
 
   function setPeer(on) {
     peerConnected = on;
     document.body.classList.toggle('connected', on);
-    if (on) setPill('on', peerPicking ? 'Choosing files…' : 'Connected');
+    if (on) setPill('on', peerPicking ? peerPickLabel : 'Connected');
     else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
     if (!on) $('peerName').textContent = 'Device';
     for (const t of outgoing.values()) if (t.state === 'offered') render(t);
@@ -633,13 +635,15 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     t.state = 'saving'; render(t);
     let writer = null;
     if (typeof window.showSaveFilePicker === 'function') {
+      setPicking(true, 'save');
       try {
         const handle = await window.showSaveFilePicker({ suggestedName: t.name });
         writer = await handle.createWritable();
       } catch (e) {
-        if (e && e.name === 'AbortError') { if (t.state === 'saving') { t.state = 'offered'; render(t); } return; }
+        if (e && e.name === 'AbortError') { setPicking(false); if (t.state === 'saving') { t.state = 'offered'; render(t); } return; }
         writer = null; // picker unsupported here: try the other ways below
       }
+      setPicking(false);
     }
     if (!writer && t.state === 'saving') writer = await streamWriter(t).catch(() => null);
     if (t.state !== 'saving') { if (writer) writer.abort().catch(() => {}); return; }
@@ -705,6 +709,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     };
     try {
       await withTimeout(isRegistered, 3000);
+      maybeChoosingSaveLocation();
       frame.src = url;
       document.body.appendChild(frame);
       await withTimeout(isStarted, 5000);  // the browser asked the worker for the download
@@ -793,6 +798,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function download(t) {
+    maybeChoosingSaveLocation();
     const a = el('a'); a.href = t.url; a.download = t.name; a.rel = 'noopener';
     document.body.appendChild(a); a.click(); a.remove();
   }
@@ -908,11 +914,22 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   // ---------- UI wiring ----------
   // Tell the other device while our file picker is open (see setPeerPicking).
-  let picking = false, pickerAway = false;
-  function setPicking(on) {
-    if (picking === on) return;
-    picking = on; pickerAway = false;
-    send({ type: 'picking', active: on });
+  // `what`: 'open' (choosing files to send) or 'save' (choosing where to save).
+  let picking = false, pickerAway = false, pickDone = null;
+  function setPicking(on, what = 'open') {
+    clearTimeout(pickDone); pickDone = null;  // a new picker or prompt supersedes a pending "done"
+    if (on) pickerAway = false;
+    // always (re)announce a start: the other side forgets it when we reconnect
+    if (picking === on && !on) return;
+    picking = on;
+    send({ type: 'picking', active: on, what });
+  }
+  // Starting a download may or may not make the browser ask where to save
+  // (Chrome on Android does, depending on its settings). Announce it, and take it
+  // back if the page wasn't left for a prompt within a few seconds.
+  function maybeChoosingSaveLocation() {
+    setPicking(true, 'save');
+    pickDone = setTimeout(() => { if (!pickerAway) setPicking(false); }, 3000);
   }
   $('fileInput').addEventListener('click', () => setPicking(true));
   $('fileInput').addEventListener('cancel', () => setPicking(false));
@@ -920,7 +937,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   // Browsers without the "cancel" event: the picker takes focus away (or hides
   // the page) and gives it back when closed, possibly without "change".
   const pickerLeft = () => { if (picking) pickerAway = true; };
-  const pickerBack = () => { if (picking && pickerAway && !document.hidden) setTimeout(() => setPicking(false), 1000); };
+  const pickerBack = () => {
+    if (picking && pickerAway && !document.hidden) { clearTimeout(pickDone); pickDone = setTimeout(() => setPicking(false), 1000); }
+  };
   window.addEventListener('blur', pickerLeft);
   window.addEventListener('focus', pickerBack);
   document.addEventListener('visibilitychange', () => (document.hidden ? pickerLeft() : pickerBack()));

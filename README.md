@@ -105,7 +105,7 @@ Memory therefore stays bounded however large the file is.
   - Coming back to the page triggers a quick check with the server, and a connection that died silently is replaced within about 3 seconds. The page also checks every 15 seconds of silence.
   - Files picked while the connection is down are offered as soon as the other device is back.
   - The client id is kept per tab (`sessionStorage`). If the phone reloads the tab, the page gets its place in the session back instead of ending up in a new session.
-- **Choosing files** (on any device): the page tells the other device when its file picker opens and closes, and the other device's status shows **"Choosing files…"**. Phones often lose the connection while the picker is open. During that time a drop is expected, so it isn't reported as a disconnect, and the transfer screen stays up. When the phone is back, everything continues quietly. If it hasn't returned after 2 minutes, it counts as disconnected. A connection lost any other way, for example when the app goes to the background, is reported right away as "Device disconnected".
+- **Choosing files or a save location** (on any device): the page tells the other device when its file picker opens and closes, and the other device's status shows **"Choosing files…"**. The same goes for choosing where to save a received file, shown as **"Choosing where to save…"**: the desktop "Save as" dialog, or the prompt Chrome on Android may show when a download starts. The page can't know whether that prompt will appear, so it withdraws the announcement after 3 seconds unless the page was left in the meantime. Phones often lose the connection while the picker is open. During that time a drop is expected, so it isn't reported as a disconnect, and the transfer screen stays up. When the phone is back, everything continues quietly. If it hasn't returned after 2 minutes, it counts as disconnected. A connection lost any other way, for example when the app goes to the background, is reported right away as "Device disconnected".
 - Reloading the page still starts its transfers over, because the browser can't keep the selected file or the partial download across a reload. Transfers in progress end with "The other device reloaded the page" instead of waiting forever.
 - When the server is upgraded, pages left open would reconnect and keep running the old code. The server therefore sends a build id, and a page that's older than the server reloads itself once.
 
@@ -120,7 +120,7 @@ The server only relays messages between the two devices of a session. Apart from
   - `pong`, the reply to the page's `ping` liveness check
 - **Between the devices** (JSON text):
   - `info {name, instance}`
-  - `picking {active}`
+  - `picking {active, what}` (`what` is `open` when choosing files to send, `save` when choosing a save location)
   - `offer {id, name, size, mime}`
   - `accept {id, offset}`
   - `decline {id}`
@@ -194,6 +194,7 @@ What is covered:
   - streamed downloads to an Android phone through the service worker
   - resuming after the receiver or the sender loses its connection mid-transfer
   - "Choosing files…" while the picker is open, versus a real disconnect being reported
+  - "Choosing where to save…" for the desktop save dialog and for a phone's download prompt (including a connection drop meanwhile), and its withdrawal when no prompt appears
   - files picked while disconnected, a silently dead connection being replaced, a phone reload (with and without a transfer running)
   - the screen wake lock, and the hint where it's unsupported
   - a sender whose timers are throttled as in a background tab keeps full speed
