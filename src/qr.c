@@ -404,34 +404,3 @@ int qr_encode(const uint8_t *data, size_t len, int ecl, int boost, int force_mas
     q->mask = mask;
     return 0;
 }
-
-char *qr_to_svg(const qr_code *q, int border)
-{
-    int dim = q->size + 2 * border;
-    size_t cap = 512 + (size_t)q->size * q->size * 24;
-    char *s = malloc(cap);
-    if (!s)
-        return NULL;
-    size_t n = (size_t)snprintf(
-        s, cap,
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" viewBox=\"0 0 %d %d\" "
-        "shape-rendering=\"crispEdges\">"
-        "<rect width=\"100%%\" height=\"100%%\" fill=\"#ffffff\"/><path fill=\"#000000\" d=\"",
-        dim, dim);
-    for (int y = 0; y < q->size; y++)
-        for (int x = 0; x < q->size;) {
-            if (!q->mod[y][x]) {
-                x++;
-                continue;
-            }
-            int run = 1;
-            while (x + run < q->size && q->mod[y][x + run])
-                run++;
-            n += (size_t)snprintf(s + n, cap - n, "M%d,%dh%dv1h-%dz", x + border, y + border,
-                                  run, run);
-            x += run;
-        }
-    snprintf(s + n, cap - n, "\"/></svg>\n");
-    return s;
-}

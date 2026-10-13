@@ -5,6 +5,8 @@
 #include "tls.h"
 #include "index_html.h"
 #include "sw_js.h"
+#include "e2e_js.h"
+#include "qr_js.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -400,9 +402,9 @@ static char g_build[17];
 static void compute_build_id(void)
 {
     uint64_t h = 0xcbf29ce484222325ull; /* FNV-1a */
-    const uint8_t *parts[2] = {g_template ? (const uint8_t *)g_template : index_html, sw_js};
-    size_t lens[2] = {g_template ? g_template_len : index_html_len, sw_js_len};
-    for (int p = 0; p < 2; p++)
+    const uint8_t *parts[4] = {g_template ? (const uint8_t *)g_template : index_html, sw_js, e2e_js, qr_js};
+    size_t lens[4] = {g_template ? g_template_len : index_html_len, sw_js_len, e2e_js_len, qr_js_len};
+    for (int p = 0; p < 4; p++)
         for (size_t i = 0; i < lens[p]; i++)
             h = (h ^ parts[p][i]) * 0x100000001b3ull;
     snprintf(g_build, sizeof g_build, "%016llx", (unsigned long long)h);
@@ -436,28 +438,6 @@ static void serve_index(conn *c)
                  "Content-Security-Policy: default-src 'self'; img-src 'self' data: blob:; "
                  "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
                  "connect-src 'self' ws: wss:\r\n");
-}
-
-static void serve_qr(conn *c, const http_request *req)
-{
-    char data[1024];
-    int n = query_param(req->query, "d", data, sizeof data);
-    if (n <= 0) {
-        http_error(c, 400, "Bad Request");
-        return;
-    }
-    static qr_code qr;
-    if (qr_encode((const uint8_t *)data, (size_t)n, QR_ECC_M, 1, -1, &qr) != 0) {
-        http_error(c, 414, "URI Too Long");
-        return;
-    }
-    char *svg = qr_to_svg(&qr, 4);
-    if (!svg) {
-        http_error(c, 500, "Internal Server Error");
-        return;
-    }
-    http_respond(c, 200, "OK", "image/svg+xml", svg, strlen(svg), NULL);
-    free(svg);
 }
 
 /* Client ids are opaque tokens: [A-Za-z0-9_-], at most 64 characters. */
@@ -623,10 +603,12 @@ static void handle_http(conn *c)
     }
     if (strcmp(req.path, "/") == 0 || strcmp(req.path, "/index.html") == 0)
         serve_index(c);
-    else if (strcmp(req.path, "/qr.svg") == 0)
-        serve_qr(c, &req);
     else if (strcmp(req.path, "/sw.js") == 0)
         http_respond(c, 200, "OK", "text/javascript; charset=utf-8", sw_js, sw_js_len, NULL);
+    else if (strcmp(req.path, "/e2e.js") == 0)
+        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", e2e_js, e2e_js_len, NULL);
+    else if (strcmp(req.path, "/qr.js") == 0)
+        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", qr_js, qr_js_len, NULL);
     else if (strcmp(req.path, "/ws") == 0 && is_get)
         ws_upgrade(c, &req);
     else if (strcmp(req.path, "/health") == 0)

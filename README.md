@@ -12,7 +12,7 @@ Send files between a computer and a phone, or any two devices, right from the br
 - **Both directions:** each device can send. Files show up on the other side with Accept / Decline.
 - **Large files:** data streams straight through and is never stored.
 - **Robust on phones:** transfers resume after a dropped connection, and the screen stays on while transferring.
-- **Optional HTTPS** with your own certificate.
+- **Optional HTTPS** with your own certificate, and with it optional **end-to-end encryption**: the server only relays data it can't read.
 - **A single small C program:** the web app is built in. It needs no dependencies, or only OpenSSL if you want HTTPS.
 - Responsive, with light and dark themes.
 
@@ -66,6 +66,14 @@ mkcert -cert-file cert.pem -key-file key.pem 192.168.1.20 localhost
 ```
 
 Behind a reverse proxy that handles TLS (Caddy, nginx), run ezxfer without a certificate and pass `--url https://your.host`.
+
+## End-to-end encryption
+
+On HTTPS pages, tick **End-to-end encryption** before the other device connects. Files and file names are then encrypted in the browser (AES-256-GCM) with a key the server never sees.
+- **Scanning the QR code or opening the link** joins with the key; it's part of the link.
+- **Typing the session code** asks for the key shown under the QR code.
+
+The page itself is still served by ezxfer, so this protects against the relay and anything in between (e.g. a proxy), not against a modified server.
 
 ## Good to know
 

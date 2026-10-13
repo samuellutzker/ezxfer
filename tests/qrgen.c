@@ -1,6 +1,6 @@
 /* Test helper: encode stdin with the project's QR encoder and print the matrix.
- * Usage: qrgen <ecl 0-3> <mask -1..7> [svg] < data
- * Output: "<version> <ecl> <mask>" then one line of 0/1 per row (or the SVG). */
+ * Usage: qrgen <ecl 0-3> <mask -1..7> < data
+ * Output: "<version> <ecl> <mask>" then one line of 0/1 per row. */
 #include "qr.h"
 
 #include <stdio.h>
@@ -17,12 +17,6 @@ int main(int argc, char **argv)
     if (qr_encode(data, n, atoi(argv[1]), 0, atoi(argv[2]), &q) != 0) {
         puts("TOO_LONG");
         return 1;
-    }
-    if (argc > 3 && strcmp(argv[3], "svg") == 0) {
-        char *svg = qr_to_svg(&q, 4);
-        fputs(svg, stdout);
-        free(svg);
-        return 0;
     }
     printf("%d %d %d\n", q.version, q.ecl, q.mask);
     for (int y = 0; y < q.size; y++) {

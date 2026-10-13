@@ -321,23 +321,6 @@ static void test_qr(void)
     CHECK(qr_encode(data, 200, QR_ECC_L, 0, -1, &q) == 0 && q.version >= 7);
     CHECK(finder_ok(&q, q.size - 7, 0));
     CHECK(qr_encode(data, 10, 9, 0, -1, &q) == -1); /* bad ecl */
-
-    /* SVG rendering */
-    CHECK(qr_encode((const uint8_t *)url, strlen(url), QR_ECC_M, 1, -1, &q) == 0);
-    char *svg = qr_to_svg(&q, 4);
-    CHECK(svg != NULL);
-    char vb[64];
-    snprintf(vb, sizeof vb, "viewBox=\"0 0 %d %d\"", q.size + 8, q.size + 8);
-    CHECK(strstr(svg, vb) != NULL);
-    CHECK(strstr(svg, "M4,4h7v1h-7z") != NULL); /* top row of the top-left finder */
-    CHECK(strstr(svg, "</svg>") != NULL);
-    free(svg);
-
-    /* The largest symbol renders without overflowing its buffer */
-    CHECK(qr_encode(data, 2953, QR_ECC_L, 0, -1, &q) == 0 && q.size == 177);
-    svg = qr_to_svg(&q, 4);
-    CHECK(svg && strstr(svg, "</svg>"));
-    free(svg);
 }
 
 int main(void)

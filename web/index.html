@@ -85,6 +85,20 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .code-row { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 6px; gap: 10px; }
 .code { font: 600 26px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .18em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .link { font-size: 12.5px; color: var(--muted); word-break: break-all; }
+.e2e { margin-top: 14px; padding: 12px 14px; border-radius: 14px; background: var(--faint); font-size: 13.5px; }
+.e2e label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; }
+.e2e input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.e2e .key { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.e2e .key b { display: block; margin-top: 3px; color: var(--text); font: 600 16px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .06em; user-select: all; }
+.connected-info .who .lock { display: block; color: var(--ok); }
+dialog { width: min(92vw, 400px); padding: 22px; border-radius: var(--radius); border: 1px solid var(--card-border); background: var(--bg2); color: var(--text); box-shadow: var(--shadow); }
+dialog::backdrop { background: rgba(0,0,0,.55); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+dialog h2 { margin: 0 0 4px; font-size: 17px; }
+dialog p { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; }
+dialog input { width: 100%; padding: 12px 14px; border-radius: 12px; background: var(--faint); border: 1px solid var(--card-border); outline: none; text-transform: uppercase; letter-spacing: .08em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+dialog input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,92,255,.25); }
+dialog .err { min-height: 1.5em; margin: 6px 0 10px; color: var(--err); font-size: 13px; }
+dialog .row { display: flex; justify-content: flex-end; gap: 8px; }
 .divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 20px 0 14px; text-transform: uppercase; letter-spacing: .08em; }
 .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--card-border); }
 form.join { display: flex; gap: 8px; }
@@ -187,6 +201,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           </button>
         </div>
         <div class="link" id="link"></div>
+        <div class="e2e" id="e2eBox" hidden>
+          <label><input type="checkbox" id="e2eToggle"> End-to-end encryption</label>
+          <div class="key" id="keyBox" hidden>Key for joining by code<b id="keyText"></b></div>
+        </div>
         <div class="divider">or join a session</div>
         <form class="join" id="joinForm" autocomplete="off">
           <label class="sr" for="joinCode">Session code</label>
@@ -196,7 +214,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       </div>
       <div class="connected-info">
         <div class="avatar"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/></svg></div>
-        <div class="who"><b id="peerName">Device</b><span>Connected · session <span id="code2"></span></span></div>
+        <div class="who"><b id="peerName">Device</b><span>Connected · session <span id="code2"></span><span class="lock" id="lock" hidden>🔒 End-to-end encrypted</span></span></div>
         <button class="btn ghost small danger" id="leaveBtn">Disconnect</button>
       </div>
     </section>
@@ -222,6 +240,19 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   <footer>Files go straight from one browser to the other through this server and are never stored.</footer>
 </div>
 <div class="toasts" id="toasts"></div>
+<dialog id="keyDialog">
+  <form id="keyForm" autocomplete="off">
+    <h2>Enter the key</h2>
+    <p>This session is end-to-end encrypted. Enter the key shown on the other device.</p>
+    <label class="sr" for="keyInput">Key</label>
+    <input id="keyInput" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" autocapitalize="characters" spellcheck="false">
+    <div class="err" id="keyErr"></div>
+    <div class="row"><button type="button" class="btn ghost" id="keyLeave">Leave</button><button class="btn primary">Connect</button></div>
+  </form>
+</dialog>
+
+<script src="/e2e.js"></script>
+<script src="/qr.js"></script>
 
 <script>
 'use strict';
@@ -242,7 +273,14 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function kickPump() { const w = pumpWaiter; pumpWaiter = null; if (w) w(); }
 
   let ws = null, session = null, peerConnected = false, joinUrl = '';
-  let intentionalClose = false, reconnectDelay = 800;
+  let intentionalClose = false, reconnectDelay = 800, requested = null;
+  // End-to-end encryption (all crypto is in e2e.js). The session's key, if it
+  // uses one, and the channel to the other device once both have shown that
+  // they hold that key. Until then, nothing but the handshake goes to it.
+  let keyText = null, keyOwn = false, wantE2E = false, chan = null;
+  let peerMode = null;   // the other device's handshake message
+  let greeting = null;   // what to do once the handshake completes
+  let rejected = 0;      // dropped incoming messages that weren't sealed with the key (exposed for tests)
   const randomHex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => b.toString(16).padStart(2, '0')).join('');
   // Transfer ids start at a random point so a reloaded page never reuses ids
   // the other device still remembers from before the reload.
@@ -305,7 +343,64 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3800);
   }
   function setPill(cls, text) { $('pill').className = 'pill ' + cls; $('pillText').textContent = text; }
-  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  // ---------- talking to the network ----------
+  // Only toServer() and wire() write to the socket.
+  // toServer(): the server's ping and the encryption handshake, neither of
+  // which says anything about files.
+  function toServer(obj) {
+    if (obj.type !== 'ping' && obj.type !== 'mode') throw new Error('not a server message: ' + obj.type);
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+  }
+  // wire(): everything for the other device. In an encrypted session it takes
+  // nothing but E2E.Sealed boxes, which only e2e.js can make: plaintext can't
+  // reach the network, whatever the rest of the page does.
+  function wire(payload, chunkHeader) {
+    if (!ws || ws.readyState !== 1) return;
+    if (keyText) {
+      if (!(payload instanceof E2E.Sealed)) throw new Error('E2E: refusing to send unencrypted data');
+      payload = chunkHeader ? payload.bytes : { type: 'sealed', box: E2E.toB64(payload.bytes) };
+    }
+    ws.send(chunkHeader ? new Blob([chunkHeader, payload]) : JSON.stringify(payload));
+  }
+  // A message for the other device, sent once the handshake is done. With
+  // encryption, sealing is asynchronous; the queue keeps messages in order.
+  let txQueue = Promise.resolve();
+  function toPeer(obj) {
+    if (!peerConnected) return;
+    if (!keyText) { wire(obj); return; }
+    const c = chan;
+    txQueue = txQueue.then(() => c.sealMessage(obj)).then((box) => { if (c === chan) wire(box); }).catch(console.error);
+  }
+
+  // Everything that arrives is handled in order, one at a time (opening sealed
+  // boxes is asynchronous). The server's messages and the handshake are
+  // plaintext; the rest comes from the other device and is only used after the
+  // handshake, and in an encrypted session only if it opens with the key.
+  let rxQueue = Promise.resolve();
+  const FROM_SERVER = ['hello', 'peer', 'error', 'pong'];
+  async function receive(data) {
+    let msg = null, header = null, body = null;
+    if (typeof data === 'string') {
+      try { msg = JSON.parse(data); } catch (_) { return; }
+      if (FROM_SERVER.includes(msg.type)) return onServerMessage(msg);
+      if (msg.type === 'mode') return onMode(msg);
+    } else {
+      if (data.byteLength < HDR) return;
+      header = new Uint8Array(data, 0, HDR); body = new Uint8Array(data, HDR);
+    }
+    if (!peerConnected) return;
+    if (keyText) {
+      const c = chan;
+      try {
+        if (header) body = await c.openChunk(header, body);
+        else if (msg.type === 'sealed') msg = await c.openMessage(E2E.fromB64(msg.box));
+        else throw new Error('not sealed');
+      } catch (_) { rejected++; return; }
+      if (c !== chan) return;
+    }
+    if (header) onChunk(header, body); else onPeerMessage(msg);
+  }
 
   // ---------- connection ----------
   function connect(code) {
@@ -314,15 +409,13 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const sock = new WebSocket(proto + '//' + location.host + '/ws?c=' + clientId + (code ? '&s=' + encodeURIComponent(code) : ''));
     sock.binaryType = 'arraybuffer';
     ws = sock;
+    requested = code;
     connections++;
     setPill('wait', code ? 'Joining…' : 'Connecting…');
     sock.onmessage = (e) => {
       if (sock !== ws) return;
       lastRx = performance.now();
-      if (typeof e.data === 'string') {
-        let msg; try { msg = JSON.parse(e.data); } catch (_) { return; }
-        onMessage(msg);
-      } else onBinary(e.data);
+      rxQueue = rxQueue.then(() => sock === ws && receive(e.data)).catch(console.error);
     };
     sock.onopen = () => { reconnectDelay = 800; };
     sock.onclose = (e) => socketLost(sock, e.code);
@@ -359,7 +452,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (!sock || sock.readyState !== 1 || (aliveCheck && !fresh)) return;
     clearTimeout(aliveCheck);
     const asked = performance.now();
-    send({ type: 'ping' });  // answered by the server itself
+    toServer({ type: 'ping' });  // answered by the server itself
     aliveCheck = setTimeout(() => {
       aliveCheck = null;
       if (ws !== sock || lastRx >= asked) return;  // something arrived: alive
@@ -387,7 +480,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     connect(newCode || null);
   }
 
-  function onMessage(m) {
+  function onServerMessage(m) {
     switch (m.type) {
       case 'hello':
         if (m.build && m.build !== BUILD && !BUILD.startsWith('{{')) {
@@ -404,11 +497,15 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           }
           toast('This page is out of date — please reload it', true);  // reloading didn't help (e.g. a cache)
         }
-        session = m.session; joinUrl = m.url;
+        if (m.session !== session) {
+          session = m.session;
+          const kept = loadKey(session);
+          if (kept) setKey(kept.key, kept.own);
+          else setKey(wantE2E && !requested ? E2E.newKey() : null, true);  // a new session of our own
+        }
+        joinUrl = m.url;
         $('code').textContent = session; $('code2').textContent = session;
-        $('link').textContent = joinUrl;
-        $('qr').onload = () => { $('qrSpin').hidden = true; };
-        $('qr').src = '/qr.svg?d=' + encodeURIComponent(joinUrl);
+        showJoinLink();
         history.replaceState(null, '', '?s=' + session);
         if (!peerConnected) setPill('wait', 'Waiting for device');
         break;
@@ -419,10 +516,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           const wasPicking = same && peerPicking;  // back from its file picker: nothing to report
           setPeerPicking(false);
           if (!same) { failActive('The other device left'); peerId = id; peerInstance = ''; }
-          setPeer(true);
-          send({ type: 'info', name: deviceName(), instance: instanceId });
-          if (same) { resumeWithPeer(); if (!wasPicking) toast('Device reconnected'); } else toast('Device connected');
+          resetHandshake();
+          peerConnected = false;  // nothing goes to the device until the handshake is done
+          greeting = { same, wasPicking };
+          return startHandshake();
         } else {
+          resetHandshake();
           pauseActive();
           if (peerPicking) {
             // Phones usually lose the connection while their file picker is open.
@@ -439,7 +538,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           }
         }
         break;
-      case 'picking': setPeerPicking(!!m.active, m.what); break;
       case 'error':
         // Unknown, expired or full session: start a fresh one instead
         intentionalClose = true;
@@ -450,6 +548,13 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         history.replaceState(null, '', location.pathname);
         setTimeout(() => connect(null), 100);
         break;
+      case 'pong': break;
+    }
+  }
+
+  function onPeerMessage(m) {
+    switch (m.type) {
+      case 'picking': setPeerPicking(!!m.active, m.what); break;
       case 'info':
         $('peerName').textContent = String(m.name || 'Device').slice(0, 40);
         if (m.instance) {
@@ -457,7 +562,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           peerInstance = String(m.instance);
         }
         break;
-      case 'pong': break;
       case 'offer': addIncoming(m); break;
       case 'accept': onAccepted(m); break;
       case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') endOut(t, 'declined'); break; }
@@ -467,6 +571,87 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       case 'done': { const t = outgoing.get(m.id); if (t && OUT_ACTIVE.includes(t.state)) { t.acked = t.size; endOut(t, 'done'); } break; }
     }
   }
+
+  // ---------- encryption handshake ----------
+  // When the other device connects, each side says whether it encrypts and, if
+  // so, adds a key check: a box only a device with the same key can open. A
+  // device without the key is asked for it; until both agree, nothing else is
+  // exchanged. An encrypting device never falls back to plaintext.
+  async function startHandshake() {
+    if (keyText && !E2E.available) { setPill('off', 'Encrypted session: needs HTTPS'); return; }
+    chan = keyText ? await E2E.channel(keyText, session, clientId, peerId) : null;
+    toServer({ type: 'mode', e2e: !!chan, check: chan ? await chan.makeCheck() : '' });
+    if (peerMode) await onMode(peerMode);
+  }
+
+  async function onMode(m) {
+    peerMode = m;
+    if (peerConnected || !peerId || (keyText && !chan)) return;  // done, or our own half isn't ready
+    if (m.e2e && !keyText) return askForKey('');
+    if (!m.e2e && !keyText) return peerReady();
+    if (m.e2e && await chan.verifyCheck(m.check)) return peerReady();
+    // We encrypt but the other device can't open our boxes yet.
+    if (keyOwn || !m.e2e) setPill('wait', 'Waiting for the other device to enter the key');
+    else askForKey('This key doesn’t match the other device’s');
+  }
+
+  function peerReady() {
+    $('keyDialog').close();
+    setPeer(true);
+    toPeer({ type: 'info', name: deviceName(), instance: instanceId });
+    const g = greeting || {}; greeting = null;
+    if (g.same) { resumeWithPeer(); if (!g.wasPicking) toast('Device reconnected'); } else toast('Device connected');
+  }
+
+  function resetHandshake() { chan = null; peerMode = null; greeting = null; $('keyDialog').close(); }
+
+  function askForKey(error) {
+    if (!E2E.available) { setPill('off', 'Encrypted session: needs HTTPS'); return; }
+    setPill('wait', 'Enter the key');
+    $('keyErr').textContent = error;
+    if (!$('keyDialog').open) { $('keyInput').value = ''; $('keyDialog').showModal(); }
+  }
+
+  async function submitKey(e) {
+    e.preventDefault();
+    const key = E2E.normalizeKey($('keyInput').value);
+    if (!key) { $('keyErr').textContent = 'A key has 20 letters and digits'; return; }
+    if (!peerMode || !peerMode.e2e) { $('keyErr').textContent = 'The other device isn’t connected'; return; }
+    const c = await E2E.channel(key, session, clientId, peerId);
+    if (!(await c.verifyCheck(peerMode.check))) { $('keyErr').textContent = 'This key doesn’t match the other device’s'; return; }
+    $('keyDialog').close();
+    setKey(key, false);
+    rxQueue = rxQueue.then(startHandshake);  // tell the other device; we're ready once ours checks out too
+  }
+
+  // The session's key, kept per session code so a reloaded page still has it.
+  // `own`: made here, so this device shows it rather than asks for it.
+  function loadKey(code) {
+    try { const k = JSON.parse(sessionStorage.getItem('ezxfer-key:' + code)); if (E2E.normalizeKey(k.key)) return k; } catch (_) {}
+    return linkKey && code === initial ? { key: linkKey, own: false } : null;  // storage blocked
+  }
+  function setKey(key, own) {
+    keyText = key; keyOwn = own;
+    try {
+      if (key) sessionStorage.setItem('ezxfer-key:' + session, JSON.stringify({ key, own }));
+      else sessionStorage.removeItem('ezxfer-key:' + session);
+    } catch (_) {}
+    $('e2eToggle').checked = !!key;
+    $('keyBox').hidden = !key;
+    $('keyText').textContent = key ? E2E.formatKey(key) : '';
+    showJoinLink();
+  }
+
+  // The join link and its QR code, drawn here: with encryption they carry the
+  // key after "#", which browsers never send to a server.
+  function showJoinLink() {
+    if (!joinUrl) return;
+    const url = joinUrl + (keyText ? '#k=' + E2E.normalizeKey(keyText) : '');
+    $('link').textContent = url;
+    $('qr').src = 'data:image/svg+xml,' + encodeURIComponent(QR.svg(url));
+    $('qrSpin').hidden = true;
+  }
+  const joinLink = () => $('link').textContent;
 
   // The other device has its file picker open (it says so when the picker opens
   // and closes). A connection drop meanwhile is expected and not reported, unless
@@ -483,7 +668,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   function setPeer(on) {
     peerConnected = on;
+    if (!on) resetHandshake();
     document.body.classList.toggle('connected', on);
+    $('lock').hidden = !(on && chan);
     if (on) setPill('on', peerPicking ? peerPickLabel : 'Connected');
     else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
     if (!on) $('peerName').textContent = 'Device';
@@ -523,7 +710,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function resumeWithPeer() {
     for (const t of outgoing.values()) {
       if (t.state === 'offered') sendOffer(t);
-      else if (t.state === 'cancelled') send({ type: 'cancel', id: t.id, from: 'sender' });
+      else if (t.state === 'cancelled') toPeer({ type: 'cancel', id: t.id, from: 'sender' });
     }
     for (const t of incoming.values()) {
       if (t.peer !== peerId) continue;
@@ -531,11 +718,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         t.paused = false; t.lastAck = t.received;
         t.started = performance.now(); t.base = t.received;
         if (t.received > 0) resumes++;
-        send({ type: 'accept', id: t.id, offset: t.received });
+        toPeer({ type: 'accept', id: t.id, offset: t.received });
         render(t);
-      } else if (t.state === 'declined') send({ type: 'decline', id: t.id });
-      else if (t.state === 'cancelled' || t.state === 'failed') send({ type: 'cancel', id: t.id, from: 'receiver' });
-      else if (t.state === 'done') send({ type: 'done', id: t.id });
+      } else if (t.state === 'declined') toPeer({ type: 'decline', id: t.id });
+      else if (t.state === 'cancelled' || t.state === 'failed') toPeer({ type: 'cancel', id: t.id, from: 'receiver' });
+      else if (t.state === 'done') toPeer({ type: 'done', id: t.id });
     }
   }
 
@@ -554,14 +741,14 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       sendOffer(t);
     }
   }
-  const sendOffer = (t) => send({ type: 'offer', id: t.id, name: t.name, size: t.size, mime: t.file.type || '' });
+  const sendOffer = (t) => toPeer({ type: 'offer', id: t.id, name: t.name, size: t.size, mime: t.file.type || '' });
 
   // "accept" starts a transfer, or continues it from `offset` after a reconnect.
   async function onAccepted(m) {
     const t = outgoing.get(m.id);
     if (!t || t.state === 'cancelled' || t.state === 'failed') {
       // unknown here (e.g. we reloaded) or over: don't leave the receiver waiting
-      send({ type: 'cancel', id: m.id, from: 'sender' });
+      toPeer({ type: 'cancel', id: m.id, from: 'sender' });
       return;
     }
     if (!OUT_ACTIVE.includes(t.state)) return;
@@ -570,7 +757,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     // can't be read any more (deleted, access revoked), the browser would fail the
     // whole connection instead, so check first.
     try { await t.file.slice(offset, offset + 1).arrayBuffer(); }
-    catch (_) { endOut(t, 'failed', 'Could not read file'); send({ type: 'cancel', id: t.id, from: 'sender' }); return; }
+    catch (_) { endOut(t, 'failed', 'Could not read file'); toPeer({ type: 'cancel', id: t.id, from: 'sender' }); return; }
     if (!OUT_ACTIVE.includes(t.state)) return;  // cancelled meanwhile
     t.sent = t.acked = t.base = offset;
     t.started = performance.now();
@@ -600,11 +787,19 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           dv.setUint32(0, t.id);
           dv.setUint32(4, Math.floor(start / 4294967296));
           dv.setUint32(8, start >>> 0);
-          sock.send(new Blob([hdr, t.file.slice(start, end)]));  // read by the browser, no copy in JS
+          if (!keyText) wire(t.file.slice(start, end), hdr);  // read by the browser, no copy in JS
+          else {
+            const c = chan;
+            let box;
+            try { box = await c.sealChunk(hdr, new Uint8Array(await t.file.slice(start, end).arrayBuffer())); }
+            catch (_) { endOut(t, 'failed', 'Could not read file'); toPeer({ type: 'cancel', id: t.id, from: 'sender' }); break; }
+            if (c !== chan || ws !== sock || t.sent !== start || t.state !== 'sending' || t.paused) continue;  // changed meanwhile
+            wire(box, hdr);
+          }
           t.sent = end;
           render(t);
         }
-        if (t.state === 'sending' && !t.paused && t.sent >= t.size) { send({ type: 'eof', id: t.id }); t.state = 'finishing'; }
+        if (t.state === 'sending' && !t.paused && t.sent >= t.size) { toPeer({ type: 'eof', id: t.id }); t.state = 'finishing'; }
         render(t);
         const qi = sendQueue.indexOf(t);
         if (qi >= 0) sendQueue.splice(qi, 1);
@@ -615,7 +810,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function cancelOutgoing(t) {
     if (!OUT_ACTIVE.includes(t.state)) return;
     endOut(t, 'cancelled');
-    send({ type: 'cancel', id: t.id, from: 'sender' });
+    toPeer({ type: 'cancel', id: t.id, from: 'sender' });
   }
 
   // ---------- receiving ----------
@@ -654,7 +849,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     // if the connection dropped while the save dialog was open, accepting is
     // repeated when the other device is back (see resumeWithPeer)
     t.paused = !peerConnected;
-    send({ type: 'accept', id: t.id, offset: 0 });
+    toPeer({ type: 'accept', id: t.id, offset: 0 });
     render(t);
   }
 
@@ -736,8 +931,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function declineIncoming(t) {
-    if (t.state === 'offered' || t.state === 'saving') { endIn(t, 'declined'); send({ type: 'decline', id: t.id }); }
-    else if (t.state === 'receiving') { endIn(t, 'cancelled'); send({ type: 'cancel', id: t.id, from: 'receiver' }); }
+    if (t.state === 'offered' || t.state === 'saving') { endIn(t, 'declined'); toPeer({ type: 'decline', id: t.id }); }
+    else if (t.state === 'receiving') { endIn(t, 'cancelled'); toPeer({ type: 'cancel', id: t.id, from: 'receiver' }); }
   }
 
   function abortWriter(t) {
@@ -746,18 +941,16 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function ack(t, bytes) {
-    if (bytes - t.lastAck >= ACK_EVERY || bytes === t.size) { t.lastAck = bytes; send({ type: 'ack', id: t.id, bytes }); }
+    if (bytes - t.lastAck >= ACK_EVERY || bytes === t.size) { t.lastAck = bytes; toPeer({ type: 'ack', id: t.id, bytes }); }
   }
 
-  function onBinary(buf) {
-    if (buf.byteLength < HDR) return;
-    const dv = new DataView(buf);
+  function onChunk(header, data) {  // data: the plaintext, opened by receive() if encrypted
+    const dv = new DataView(header.buffer, header.byteOffset, HDR);
     const t = incoming.get(inKey(dv.getUint32(0)));
     if (!t || t.state !== 'receiving' || t.paused) return;
     // Only the next expected bytes are used; anything else is left over from
     // before a reconnect and the sender is already re-sending from t.received.
     if (dv.getUint32(4) * 4294967296 + dv.getUint32(8) !== t.received) return;
-    const data = new Uint8Array(buf, HDR);
     t.received += data.byteLength;
     const got = t.received;
     if (t.received > t.size) { fail(t, 'Received more data than announced'); return; }
@@ -775,7 +968,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function fail(t, reason) {
     if (t.state !== 'receiving') return;
     endIn(t, 'failed', reason);
-    send({ type: 'cancel', id: t.id, from: 'receiver' });
+    toPeer({ type: 'cancel', id: t.id, from: 'receiver' });
   }
 
   function onEof(id) {
@@ -792,7 +985,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         download(t);
       }
       ack(t, t.size);
-      send({ type: 'done', id: t.id });
+      toPeer({ type: 'done', id: t.id });
       endIn(t, 'done');
     }).catch(() => fail(t, 'Could not save file'));
   }
@@ -922,7 +1115,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     // always (re)announce a start: the other side forgets it when we reconnect
     if (picking === on && !on) return;
     picking = on;
-    send({ type: 'picking', active: on, what });
+    toPeer({ type: 'picking', active: on, what });
   }
   // Starting a download may or may not make the browser ask where to save
   // (Chrome on Android does, depending on its settings). Announce it, and take it
@@ -953,7 +1146,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   });
   $('acceptAll').addEventListener('click', () => { for (const t of incoming.values()) if (t.state === 'offered') acceptIncoming(t); });
   $('copyBtn').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(joinUrl); toast('Link copied'); }
+    try { await navigator.clipboard.writeText(joinLink()); toast('Link copied'); }
     catch (_) {
       const r = document.createRange(); r.selectNodeContents($('link'));
       const s = getSelection(); s.removeAllRanges(); s.addRange(r);
@@ -968,6 +1161,15 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     $('joinCode').value = '';
     leave(code);
   });
+  $('e2eBox').hidden = !(location.protocol === 'https:' && E2E.available);  // offered with HTTPS only
+  $('e2eToggle').addEventListener('change', (e) => {
+    wantE2E = e.target.checked;
+    setKey(wantE2E ? E2E.newKey() : null, true);
+    if (greeting) rxQueue = rxQueue.then(startHandshake);  // a device is already here: start over
+  });
+  $('keyForm').addEventListener('submit', submitKey);
+  $('keyDialog').addEventListener('cancel', (e) => e.preventDefault());  // Esc: choose Connect or Leave
+  $('keyLeave').addEventListener('click', () => { $('keyDialog').close(); history.replaceState(null, '', location.pathname); leave(null); });
   $('leaveBtn').addEventListener('click', () => { history.replaceState(null, '', location.pathname); leave(null); });
   window.addEventListener('beforeunload', (e) => {
     if (transfersBusy()) { e.preventDefault(); e.returnValue = ''; }
@@ -981,6 +1183,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   window.ezxfer = {
     get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; },
     get resumes() { return resumes; }, get connections() { return connections; },
+    get encrypted() { return peerConnected && !!chan; }, get rejected() { return rejected; },
     transfers: () => [...outgoing.values(), ...incoming.values()].map((t) => ({
       name: t.name, dir: t.file ? 'out' : 'in', state: t.state, paused: !!t.paused, via: t.via, bytes: t.file ? t.acked : t.received })),
     // Simulates a connection that died silently: the socket stays "open" but nothing arrives.
@@ -993,8 +1196,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     },
   };
 
-  const initial = new URLSearchParams(location.search).get('s');
-  connect(initial ? initial.toUpperCase() : null);
+  const initial = (new URLSearchParams(location.search).get('s') || '').toUpperCase();
+  // A join link with a key (#k=…): keep the key for that session (see loadKey).
+  const linkKey = E2E.normalizeKey(new URLSearchParams(location.hash.slice(1)).get('k'));
+  if (initial && linkKey) try { sessionStorage.setItem('ezxfer-key:' + initial, JSON.stringify({ key: linkKey, own: false })); } catch (_) {}
+  connect(initial || null);
 })();
 </script>
 </body>

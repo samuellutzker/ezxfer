@@ -256,13 +256,11 @@ def http_head(srv):
 
 
 @test
-def http_qr_svg(srv):
-    st, h, body = get(srv.port, "/qr.svg?d=" + "http%3A%2F%2F10.0.0.2%3A8080%2F%3Fs%3DABCDEF")
-    assert st == 200 and h["content-type"] == "image/svg+xml"
-    assert body.startswith(b"<?xml") and body.rstrip().endswith(b"</svg>")
-    assert get(srv.port, "/qr.svg")[0] == 400
-    assert get(srv.port, "/qr.svg?d=")[0] == 400
-    assert get(srv.port, "/qr.svg?d=" + "x" * 1100)[0] == 400  # longer than the decode buffer
+def http_scripts(srv):
+    for path, marker in (("/sw.js", b"self.addEventListener"), ("/e2e.js", b"root.E2E"), ("/qr.js", b"root.QR")):
+        st, h, body = get(srv.port, path)
+        assert st == 200 and h["content-type"].startswith("text/javascript") and marker in body, path
+    assert get(srv.port, "/qr.svg?d=x")[0] == 404  # QR codes are drawn by the page: links with a key never reach the server
 
 
 @test

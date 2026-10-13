@@ -43,6 +43,8 @@ console.log(`mode: ${TLS ? 'HTTPS/WSS (self-signed certificate, trusted by the t
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 let passed = 0;
 function ok(name, extra = '') { passed++; console.log(`  ok  ${name}${extra ? '  ' + extra : ''}`); }
+// A valid key that differs from `k`.
+const E2E_wrongKey = (k) => (k[0] === 'A' ? 'B' : 'A') + k.slice(1);
 function assert(c, msg) { if (!c) throw new Error('assertion failed: ' + msg); }
 
 const port = await new Promise((res) => { const s = net.createServer().listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); });
@@ -95,6 +97,28 @@ const mockWakeLock = () => {
       };
     },
   } });
+};
+
+// Records every WebSocket frame the page sends and receives, as the network sees it.
+const recordFrames = () => {
+  window.__frames = { out: [], in: [] };
+  const send = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (d) {
+    window.__frames.out.push(d instanceof Blob ? d.arrayBuffer().then((b) => new Uint8Array(b)) : d);
+    return send.call(this, d);
+  };
+  window.WebSocket = class extends window.WebSocket {
+    constructor(...a) { super(...a); window.__sock = this; this.addEventListener('message', (e) => window.__frames.in.push(e.data)); }
+  };
+  // Which of `needles` (strings) appear in any recorded frame, in either direction.
+  window.__leaks = async (needles) => {
+    const frames = await Promise.all([...window.__frames.out, ...window.__frames.in]);
+    const bytes = frames.map((f) => (typeof f === 'string' ? new TextEncoder().encode(f) : new Uint8Array(f)));
+    const has = (hay, n) => { outer: for (let i = 0; i + n.length <= hay.length; i++) { for (let j = 0; j < n.length; j++) if (hay[i + j] !== n[j]) continue outer; return true; } return false; };
+    return needles.filter((s) => bytes.some((b) => has(b, new TextEncoder().encode(s))));
+  };
+  // What the page put on the wire: text frame types, and binary frame sizes.
+  window.__sent = async () => (await Promise.all(window.__frames.out)).map((f) => (typeof f === 'string' ? JSON.parse(f).type : f.byteLength));
 };
 
 const row = (page, list, name) => page.locator(`#${list} .item`, { has: page.locator('.name', { hasText: name }) });
@@ -537,6 +561,162 @@ try {
     fs.unlinkSync(bgPath);
     await slowCtx.close(); await R1.context().close();
     ok('sender with background-tab timer throttling keeps full speed', `64 MB in ${secs.toFixed(1)} s`);
+  }
+
+  // ---------- end-to-end encryption ----------
+  if (!TLS) {
+    assert(await A.evaluate(() => document.getElementById('e2eBox').hidden), 'no encryption option without HTTPS');
+    ok('end-to-end encryption is not offered over plain HTTP');
+  } else {
+    const ctx = async (label) => {
+      const c = await browser.newContext({ ignoreHTTPSErrors: true });
+      await c.addInitScript(recordFrames); await c.addInitScript(mockSavePicker);
+      const p = await c.newPage(); watch(p, label);
+      p.urls = []; p.on('request', (r) => p.urls.push(r.url().split('#')[0]));  // what the server gets to see
+      return p;
+    };
+    const MARK = 'SECRET-FILE-CONTENT-', NAME = 'top-secret-plans.pdf';
+    const secretFile = (n) => Buffer.concat([Buffer.from(MARK.repeat(1000)), randomBytes(n)]);
+    const transfer = async (from, to, name, buf) => {
+      await from.setInputFiles('#fileInput', { name, mimeType: 'application/pdf', buffer: buf });
+      await row(to, 'inList', name).getByRole('button', { name: 'Accept' }).click();
+      await to.waitForFunction((n) => window.__saved[n], name, { timeout: 60000 });
+      assert((await to.evaluate((n) => window.__saved[n].sha, name)) === sha(buf), `${name} arrives intact`);
+    };
+
+    // control: without encryption the recorder does see the file and its name
+    const H0 = await ctx('plain-host'), P0 = await ctx('plain-peer');
+    await H0.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await H0.waitForFunction(() => window.ezxfer.session);
+    assert(!(await H0.isChecked('#e2eToggle')) && (await H0.isVisible('#e2eToggle')), 'offered with HTTPS, off by default');
+    await P0.goto(await H0.evaluate(() => window.ezxfer.url));
+    await H0.waitForFunction(() => window.ezxfer.connected);
+    assert(!(await H0.evaluate(() => window.ezxfer.encrypted)) && (await H0.isHidden('#lock')), 'plain session');
+    await transfer(H0, P0, NAME, secretFile(1000));
+    const plainLeaks = await H0.evaluate((n) => window.__leaks(n), [MARK, NAME]);
+    assert(plainLeaks.length === 2, 'control: plaintext visible without encryption: ' + plainLeaks);
+    await H0.context().close(); await P0.context().close();
+    ok('encryption is offered over HTTPS, off by default; without it file data is visible on the wire (control)');
+
+    // host turns encryption on: the key appears and goes into the link and QR code
+    const H = await ctx('e2e-host'), P = await ctx('e2e-peer');
+    await H.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await H.waitForFunction(() => window.ezxfer.session);
+    await H.check('#e2eToggle');
+    const key = (await H.textContent('#keyText')).trim();
+    assert(/^[A-Z2-9]{5}(-[A-Z2-9]{5}){3}$/.test(key), 'key shown: ' + key);
+    const link = await H.textContent('#link');
+    assert(link.endsWith('#k=' + key.replace(/-/g, '')), 'link carries the key after #: ' + link);
+    if (jsqr) {
+      await H.addScriptTag({ path: jsqr.file });
+      const qr = await H.evaluate(() => {
+        const c = document.createElement('canvas'); c.width = c.height = 400;
+        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 400, 400); g.drawImage(document.getElementById('qr'), 0, 0, 400, 400);
+        const r = window.jsQR(g.getImageData(0, 0, 400, 400).data, 400, 400); return r && r.data;
+      });
+      assert(qr === link, `QR code scans to the link with the key (${qr})`);
+    }
+    // the phone opens the link from the QR code
+    await P.goto(link);
+    await H.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    await P.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    assert(await H.isVisible('#lock') && await P.isVisible('#lock'), 'both show the lock');
+    assert(!P.url().includes('#'), 'key removed from the address bar: ' + P.url());
+    await H.screenshot({ path: path.join(OUT, 'desktop-encrypted.png') });
+    ok('encrypted session: key in the QR link only, phone joins by scanning, both show the lock');
+
+    // files both ways: nothing of the contents or names is on the wire
+    const down = secretFile(3 * 1024 * 1024), up = secretFile(1500000);
+    await transfer(H, P, NAME, down);
+    await transfer(P, H, 'reply-' + NAME, up);
+    for (const pg of [H, P]) {
+      const leaks = await pg.evaluate((n) => window.__leaks(n), [MARK, NAME, 'offer', 'accept', 'pdf', key, key.replace(/-/g, '')]);
+      assert(leaks.length === 0, 'found on the wire: ' + leaks);
+      const sent = await pg.evaluate(() => window.__sent());
+      const types = new Set(sent.filter((t) => typeof t === 'string'));
+      assert([...types].every((t) => ['sealed', 'mode', 'ping'].includes(t)), 'text frames: ' + [...types]);
+      // chunks: header + 1 MB + 28 bytes of nonce and tag
+      const chunks = sent.filter((t) => typeof t === 'number');
+      assert(chunks.length >= 2 && chunks.includes(12 + 1024 * 1024 + 28), 'sealed chunk sizes: ' + chunks);
+      assert(!pg.urls.some((u) => u.includes(key.replace(/-/g, ''))), 'the key never went to the server');
+    }
+    ok('files sent both ways arrive intact; the wire carries only sealed boxes, no names, contents or key');
+
+    // anything not sealed with the key is ignored: injected plaintext, garbage and
+    // the device's own boxes bounced back to it
+    const own = await P.evaluate(async () => (await Promise.all(window.__frames.out)).find((f) => typeof f === 'string' && f.includes('"sealed"')));
+    const before = await P.evaluate(() => window.ezxfer.rejected);
+    await P.evaluate((ownBox) => {
+      const deliver = (data) => window.__sock.onmessage({ data });
+      deliver(JSON.stringify({ type: 'offer', id: 4242, name: 'injected.exe', size: 10, mime: '' }));
+      deliver(JSON.stringify({ type: 'sealed', box: btoa('x'.repeat(64)) }));
+      deliver(ownBox);
+      deliver(new Uint8Array(12 + 100).buffer);
+    }, own);
+    await P.waitForFunction((b) => window.ezxfer.rejected >= b + 4, before);
+    assert(!(await P.evaluate(() => window.ezxfer.transfers().some((t) => t.name === 'injected.exe'))), 'no injected offer');
+    ok('unsealed, forged and reflected messages are dropped');
+
+    // an encrypted transfer resumes after the connection drops
+    const resumeBuf = randomBytes(24 * 1024 * 1024);
+    await P.setInputFiles('#fileInput', { name: 'resume.bin', mimeType: 'application/octet-stream', buffer: resumeBuf });
+    await row(H, 'inList', 'resume.bin').getByRole('button', { name: 'Accept' }).click();
+    await H.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'resume.bin') || {}).bytes > 6e6);
+    await P.evaluate(() => window.ezxfer.dropConnection(false));
+    await H.waitForFunction(() => window.__saved['resume.bin'], null, { timeout: 60000 });
+    assert((await H.evaluate(() => window.__saved['resume.bin'].sha)) === sha(resumeBuf), 'resumed encrypted transfer intact');
+    assert((await H.evaluate(() => window.ezxfer.resumes)) >= 1, 'resumed');
+    ok('encrypted transfer resumes after a dropped connection; bytes identical');
+
+    // the phone reloads: it keeps the key (the link no longer has it) and reconnects encrypted
+    await P.reload();
+    await P.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    await H.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    ok('reloaded page keeps the key and reconnects encrypted');
+
+    // joining by typing the code: the joiner is told a key is needed and asked for it
+    const J = await ctx('typed-joiner');
+    const H2 = await ctx('e2e-host2');
+    await H2.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await H2.waitForFunction(() => window.ezxfer.session);
+    await H2.check('#e2eToggle');
+    const key2 = (await H2.textContent('#keyText')).trim(), code2 = await H2.evaluate(() => window.ezxfer.session);
+    await J.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await J.waitForFunction(() => window.ezxfer.session);
+    await J.fill('#joinCode', code2);
+    await J.click('#joinForm button[type=submit]');
+    await J.locator('#keyDialog[open]').waitFor();
+    await H2.waitForFunction(() => document.getElementById('pillText').textContent === 'Waiting for the other device to enter the key');
+    assert(!(await J.evaluate(() => window.ezxfer.connected)) && !(await H2.evaluate(() => window.ezxfer.connected)), 'not connected yet');
+    await J.screenshot({ path: path.join(OUT, 'enter-key.png') });
+    await J.fill('#keyInput', E2E_wrongKey(key2));
+    await J.click('#keyForm button.primary');
+    await J.locator('#keyErr', { hasText: 'doesn’t match' }).waitFor();
+    await J.fill('#keyInput', key2.toLowerCase().replace(/-/g, ' '));
+    await J.click('#keyForm button.primary');
+    await J.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    await H2.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    assert(!(await J.locator('#keyDialog[open]').count()), 'dialog closed');
+    await transfer(J, H2, NAME, secretFile(200000));
+    assert((await J.evaluate((n) => window.__leaks(n), [MARK, NAME])).length === 0, 'nothing leaked');
+    ok('joining by code asks for the key: a wrong key is refused, the right one connects encrypted');
+
+    // leaving from the key dialog starts an own session
+    const L = await ctx('leaver');
+    await L.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await L.waitForFunction(() => window.ezxfer.session);
+    const H3 = await ctx('e2e-host3');
+    await H3.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await H3.waitForFunction(() => window.ezxfer.session);
+    await H3.check('#e2eToggle');
+    await L.fill('#joinCode', await H3.evaluate(() => window.ezxfer.session));
+    await L.click('#joinForm button[type=submit]');
+    await L.locator('#keyDialog[open]').waitFor();
+    await L.click('#keyLeave');
+    await L.waitForFunction((s) => window.ezxfer.session && window.ezxfer.session !== s && !document.querySelector('#keyDialog[open]'),
+      await H3.evaluate(() => window.ezxfer.session));
+    ok('leaving from the key dialog goes back to an own session');
+    for (const pg of [H, P, J, H2, L, H3]) await pg.context().close();
   }
 
   // ---------- server upgraded while a page stays open ----------

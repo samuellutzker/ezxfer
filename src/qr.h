@@ -32,8 +32,4 @@ static inline int qr_module(const qr_code *qr, int x, int y)
     return x >= 0 && y >= 0 && x < qr->size && y < qr->size && qr->mod[y][x];
 }
 
-/* Render as a standalone SVG document with `border` quiet-zone modules.
- * Returns a malloc'd NUL-terminated string (caller frees) or NULL. */
-char *qr_to_svg(const qr_code *qr, int border);
-
 #endif
