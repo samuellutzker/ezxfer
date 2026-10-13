@@ -185,6 +185,7 @@ Writes are chained on `t.chain`; acks are sent after each write.
 
 **Other parts:**
 - `updateWakeLock()` keeps the screen on while transfers are busy.
+- `openFile()`: the "Open" button on received files, for files saved through the dialog (read back with `handle.getFile()`) or held in memory. Only for types the browser shows without running anything from the file (`VIEWABLE`): an opened `blob:` URL has this page's origin, so HTML or SVG could run scripts on it. Streamed downloads can't be opened; the page doesn't learn where they were saved.
 - `setPicking()` / `setPeerPicking()` implement the "Choosing files…" and "Choosing where to save…" status:
   - **Start:** the file input's `click`, the desktop save dialog, or the start of a download. On Android, Chrome may ask for a save location there, depending on its settings.
   - **End:** `change` or `cancel`, or focus returning after the picker took it away.

@@ -66,7 +66,9 @@ const mockSavePicker = () => {
   window.__saved = {};
   window.showSaveFilePicker = async ({ suggestedName }) => {
     if (window.__pickerDelay) await new Promise((r) => setTimeout(r, window.__pickerDelay));  // user choosing a place
+    let saved = null;
     return {
+    getFile: async () => { if (!saved) throw new DOMException('not found', 'NotFoundError'); return saved; },
     createWritable: async () => {
       const parts = [];
       return {
@@ -75,6 +77,7 @@ const mockSavePicker = () => {
           parts.push(new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d)); },
         close: async () => {
           const blob = new Blob(parts);
+          saved = new File(parts, suggestedName);
           const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
           window.__saved[suggestedName] = { size: blob.size, sha: [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('') };
         },
@@ -235,6 +238,29 @@ try {
   assert(saved.size === photo.length && saved.sha === sha(photo), 'picker-saved bytes match');
   await row(B, 'outList', 'IMG_0042.HEIC').locator('.st-done').waitFor();
   ok('phone -> desktop 3 MB transfer (save-file picker), bytes identical', `${Date.now() - t0} ms`);
+
+  // ---------- received files can be opened ----------
+  // saved through the dialog: read back from disk; held in memory (the phone): from there
+  await B.setInputFiles('#fileInput', [
+    { name: 'chart.png', mimeType: 'image/png', buffer: randomBytes(5000) },
+    { name: 'page.html', mimeType: 'text/html', buffer: Buffer.from('<script>alert(1)</script>') },
+  ]);
+  for (const n of ['chart.png', 'page.html']) {
+    await row(A, 'inList', n).getByRole('button', { name: 'Accept' }).click();
+    await row(A, 'inList', n).locator('.st-done').waitFor();
+  }
+  const [shown] = await Promise.all([desk.waitForEvent('page'), row(A, 'inList', 'chart.png').getByRole('button', { name: 'Open' }).click()]);
+  assert(shown.url().startsWith('blob:'), 'opened in a new tab: ' + shown.url());
+  await shown.waitForLoadState();
+  const shownType = await shown.evaluate(() => document.contentType);
+  assert(shownType === 'image/png', 'opened as ' + shownType);
+  await shown.close();
+  assert((await row(A, 'inList', 'page.html').getByRole('button', { name: 'Open' }).count()) === 0, 'no Open for HTML');
+  const [shownB] = await Promise.all([phoneCtx.waitForEvent('page'), row(B, 'inList', 'holiday-video.mp4').getByRole('button', { name: 'Open' }).click()]);
+  assert(shownB.url().startsWith('blob:'), 'phone opened the in-memory file: ' + shownB.url());
+  assert(await row(B, 'inList', 'holiday-video.mp4').getByRole('button', { name: 'Save again' }).isVisible(), 'Save again still offered');
+  await shownB.close();
+  ok('received images and videos open in a new tab (from disk or memory); HTML is not opened');
 
   // ---------- several files queued at once ----------
   const files = [1, 2, 3].map((i) => ({ name: `doc-${i}.pdf`, mimeType: 'application/pdf', buffer: randomBytes(400000 * i) }));

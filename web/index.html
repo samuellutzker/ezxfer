@@ -828,11 +828,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   async function acceptIncoming(t) {
     if (t.state !== 'offered') return;
     t.state = 'saving'; render(t);
-    let writer = null;
+    let writer = null, handle = null;
     if (typeof window.showSaveFilePicker === 'function') {
       setPicking(true, 'save');
       try {
-        const handle = await window.showSaveFilePicker({ suggestedName: t.name });
+        handle = await window.showSaveFilePicker({ suggestedName: t.name });
         writer = await handle.createWritable();
       } catch (e) {
         if (e && e.name === 'AbortError') { setPicking(false); if (t.state === 'saving') { t.state = 'offered'; render(t); } return; }
@@ -844,6 +844,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (t.state !== 'saving') { if (writer) writer.abort().catch(() => {}); return; }
     t.writer = writer;
     t.via = writer ? (writer.via || 'picker') : 'memory';
+    if (t.via === 'picker') t.handle = handle;  // to open the saved file later
     t.chunks = writer ? null : [];
     t.state = 'receiving'; t.started = performance.now();
     // if the connection dropped while the save dialog was open, accepting is
@@ -983,6 +984,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       else {
         const blob = new Blob(t.chunks, { type: t.mime || 'application/octet-stream' });
         t.chunks = null;
+        t.blob = blob;
         t.url = URL.createObjectURL(blob);
         download(t);
       }
@@ -990,6 +992,23 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       toPeer({ type: 'done', id: t.id });
       endIn(t, 'done');
     }).catch(() => fail(t, 'Could not save file'));
+  }
+
+  // "Open" shows a received file in a new tab. Only for types the browser displays
+  // without running anything from the file: an opened file belongs to this page's
+  // origin, so e.g. HTML or SVG could run scripts with access to this page.
+  // Streamed downloads can't be opened: the page doesn't know where they went.
+  const VIEWABLE = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/[\w.+-]+|audio\/[\w.+-]+|application\/pdf|text\/plain)$/;
+  const canOpen = (t) => (t.handle || t.blob) && VIEWABLE.test(t.mime);
+  async function openFile(t) {
+    if (!t.openUrl) {
+      // the saved file, read back from disk (it may have been moved or deleted since)
+      const file = t.handle ? await t.handle.getFile().catch(() => null) : t.blob;
+      if (!file) { toast('The file can’t be opened any more', true); return; }
+      t.openUrl = URL.createObjectURL(new Blob([file], { type: t.mime }));
+    }
+    const a = el('a'); a.href = t.openUrl; a.target = '_blank'; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
   }
 
   function download(t) {
@@ -1093,7 +1112,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const acts = out ? (OUT_ACTIVE.includes(t.state) ? [['Cancel', 'ghost', () => cancelOutgoing(t)]] : [])
       : t.state === 'offered' ? [['Decline', 'ghost', () => declineIncoming(t)], ['Accept', 'primary', () => acceptIncoming(t)]]
       : t.state === 'receiving' ? [['Cancel', 'ghost', () => declineIncoming(t)]]
-      : t.state === 'done' && t.url ? [['Save again', 'ghost', () => download(t)]] : [];
+      : t.state === 'done' ? [...(canOpen(t) ? [['Open', 'ghost', () => openFile(t)]] : []), ...(t.url ? [['Save again', 'ghost', () => download(t)]] : [])]
+      : [];
     const sig = acts.map((a) => a[0]).join();
     if (t.ui.sig !== sig) {  // keep buttons stable across progress updates
       t.ui.sig = sig;
