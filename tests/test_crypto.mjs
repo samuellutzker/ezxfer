@@ -3,8 +3,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import vm from 'node:vm';
 
-createRequire(import.meta.url)('../web/e2e.js');  // classic script: sets globalThis.E2E
+const SOURCE = new URL('../web/e2e.js', import.meta.url);
+createRequire(import.meta.url)(SOURCE.pathname);  // classic script: sets globalThis.E2E
 const E2E = globalThis.E2E;
 const enc = new TextEncoder();
 const header = (id, offset) => {  // the 12-byte chunk header used by the page
@@ -22,6 +26,8 @@ async function pair(key = E2E.newKey(), session = 'ABC123') {
 test('keys look like XXXXX-XXXXX-XXXXX-XXXXX, are random, and normalize', () => {
   const keys = new Set(Array.from({ length: 200 }, () => E2E.newKey()));
   assert.equal(keys.size, 200);
+  // all 32 symbols are used (5 bits per character, 100 bits per key); 4000 characters miss one with p < 1e-50
+  assert.equal(new Set([...keys].join('').replace(/-/g, '')).size, 32);
   for (const k of keys) {
     assert.match(k, /^[A-HJ-NP-Z2-9]{5}(-[A-HJ-NP-Z2-9]{5}){3}$/);
     assert.equal(E2E.formatKey(k.toLowerCase().replace(/-/g, ' ')), k);
@@ -87,12 +93,14 @@ test('any change to a box, or to the chunk header it belongs to, is detected', a
   await assert.rejects(b.openChunk(header(1, 0), box.subarray(0, 20)));  // truncated
 });
 
-test('boxes of one kind cannot be passed off as another', async () => {
+test('a message cannot be passed off as a file chunk, or the other way round', async () => {
   const [a, b] = await pair();
   const msg = (await a.sealMessage({ type: 'cancel', id: 1 })).bytes;
-  assert.equal(await b.verifyCheck(E2E.toB64(msg)), false);  // a message is not a key check
-  await assert.rejects(b.openChunk(header(0, 0), msg));          // nor a file chunk
-  await assert.rejects(b.openMessage(E2E.fromB64(await a.makeCheck())));  // and a key check is not a message
+  await assert.rejects(b.openChunk(header(0, 0), msg));
+  await assert.rejects(b.openChunk(enc.encode('msg'), msg), /bad chunk header/);  // not even with the message label as header
+  const chunk = (await a.sealChunk(header(0, 0), enc.encode('{"type":"cancel","id":1}'))).bytes;
+  await assert.rejects(b.openMessage(chunk));
+  assert.equal(await b.verifyCheck(E2E.toB64(msg)), false);  // and an ordinary message is no key check
 });
 
 test('messages round-trip, including non-ASCII file names', async () => {
@@ -114,6 +122,21 @@ test('the key check tells whether both devices hold the same key', async () => {
   assert.equal(await joiner.verifyCheck('garbage!'), false);
   assert.equal(await joiner.verifyCheck(''), false);
   assert.notEqual(await host.makeCheck(), check);  // fresh each time
+});
+
+test('base64 round-trips binary data of any length', () => {
+  for (const n of [0, 1, 2, 3, 0x8000, 0x8001, 200000]) {  // the encoder works in 32 KB pieces
+    const b = new Uint8Array(randomBytes(n));
+    assert.equal(E2E.toB64(b), Buffer.from(b).toString('base64'), `length ${n}`);
+    assert.deepEqual(E2E.fromB64(E2E.toB64(b)), b);
+  }
+});
+
+test('without WebCrypto (browsers withhold it on plain HTTP) encryption is unavailable', () => {
+  const page = vm.createContext({ crypto: { getRandomValues: (a) => crypto.getRandomValues(a) }, TextEncoder, TextDecoder, btoa, atob });
+  vm.runInContext(fs.readFileSync(SOURCE, 'utf8'), page);
+  assert.equal(page.E2E.available, false);  // the page then doesn't offer encryption
+  assert.ok(page.E2E.normalizeKey(page.E2E.newKey()));
 });
 
 test('only E2E makes Sealed boxes, and they are immutable', async () => {

@@ -272,8 +272,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const pumpWait = () => new Promise((r) => { pumpWaiter = r; });
   function kickPump() { const w = pumpWaiter; pumpWaiter = null; if (w) w(); }
 
-  let ws = null, session = null, peerConnected = false, joinUrl = '';
-  let intentionalClose = false, reconnectDelay = 800, requested = null;
+  let ws = null, session = null, joinUrl = '';
+  let peerConnected = false;  // the other device is here and the handshake is done: we talk to it
+  let intentionalClose = false, reconnectDelay = 800;
+  let requested = null;       // the session code this connection asked to join (null: a new session)
   // End-to-end encryption (all crypto is in e2e.js). The session's key, if it
   // uses one, and the channel to the other device once both have shown that
   // they hold that key. Until then, nothing but the handshake goes to it.
@@ -500,7 +502,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         if (m.session !== session) {
           session = m.session;
           const kept = loadKey(session);
-          if (kept) setKey(kept.key, kept.own);
+          if (kept) { setKey(kept.key, kept.own); if (kept.own) wantE2E = true; }  // e.g. after a reload
           else setKey(wantE2E && !requested ? E2E.newKey() : null, true);  // a new session of our own
         }
         joinUrl = m.url;
@@ -592,7 +594,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (m.e2e && await chan.verifyCheck(m.check)) return peerReady();
     // We encrypt but the other device can't open our boxes yet.
     if (keyOwn || !m.e2e) setPill('wait', 'Waiting for the other device to enter the key');
-    else askForKey('This key doesn’t match the other device’s');
+    else askForKey(KEY_MISMATCH);
   }
 
   function peerReady() {
@@ -603,6 +605,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (g.same) { resumeWithPeer(); if (!g.wasPicking) toast('Device reconnected'); } else toast('Device connected');
   }
 
+  const KEY_MISMATCH = 'This key doesn’t match the other device’s';
   function resetHandshake() { chan = null; peerMode = null; greeting = null; $('keyDialog').close(); }
 
   function askForKey(error) {
@@ -618,7 +621,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (!key) { $('keyErr').textContent = 'A key has 20 letters and digits'; return; }
     if (!peerMode || !peerMode.e2e) { $('keyErr').textContent = 'The other device isn’t connected'; return; }
     const c = await E2E.channel(key, session, clientId, peerId);
-    if (!(await c.verifyCheck(peerMode.check))) { $('keyErr').textContent = 'This key doesn’t match the other device’s'; return; }
+    if (!(await c.verifyCheck(peerMode.check))) { $('keyErr').textContent = KEY_MISMATCH; return; }
     $('keyDialog').close();
     setKey(key, false);
     rxQueue = rxQueue.then(startHandshake);  // tell the other device; we're ready once ours checks out too
@@ -1007,13 +1010,16 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       if (!file) { toast('The file can’t be opened any more', true); return; }
       t.openUrl = URL.createObjectURL(new Blob([file], { type: t.mime }));
     }
-    const a = el('a'); a.href = t.openUrl; a.target = '_blank'; a.rel = 'noopener';
-    document.body.appendChild(a); a.click(); a.remove();
+    follow(t.openUrl, { target: '_blank' });
   }
 
   function download(t) {
     maybeChoosingSaveLocation();
-    const a = el('a'); a.href = t.url; a.download = t.name; a.rel = 'noopener';
+    follow(t.url, { download: t.name });
+  }
+
+  function follow(href, attrs) {  // like clicking a link
+    const a = Object.assign(el('a'), { href, rel: 'noopener' }, attrs);
     document.body.appendChild(a); a.click(); a.remove();
   }
 

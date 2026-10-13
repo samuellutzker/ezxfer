@@ -129,12 +129,13 @@ Optional, offered only on HTTPS pages (WebCrypto needs a secure context, and wit
 
 **Key.** 20 characters from a 32-symbol alphabet (100 bits), shown as `XXXXX-XXXXX-XXXXX-XXXXX`. The host's page makes it; it travels in the join link after `#k=` (browsers never send the fragment to a server), so the QR code is drawn by the page (`qr.js`), not the server. A device joining by typed code is asked to type it. Keys are kept in `sessionStorage` per session code, so reloads keep them.
 
-**Crypto** (`e2e.js`, unit-tested in `tests/test_crypto.mjs`):
+**Crypto** (`e2e.js`, unit-tested in `tests/test_crypto.mjs`, `make test-js`):
 - `E2E.channel(key, session, me, peer)` derives one AES-256-GCM key per direction with HKDF-SHA256 (salt `ezxfer e2e v1|<session>`, info `<from id>><to id>`). Non-extractable, kept in a closure. Separate directions mean a relay can't bounce a device's own boxes back to it.
-- A box is `iv (12) | ciphertext | tag (16)`, with a random IV each time. The additional data is `msg` for messages, `check` for key checks, and the 12-byte header for file chunks, which ties each chunk to its transfer and offset.
+- A box is `iv (12) | ciphertext | tag (16)`, with a random IV each time. The additional data is `msg` for messages and the 12-byte header for file chunks, which ties each chunk to its transfer and offset.
+- The key check is the sealed message `{"type":"key-check"}`.
 - `seal()` returns an `E2E.Sealed`, a type nothing else can create.
 
-**Handshake.** When the peer appears, each side sends `mode {e2e, check}`: whether it encrypts, plus a key check (a sealed constant) if it does. Then:
+**Handshake.** When the peer appears, each side sends `mode {e2e, check}`: whether it encrypts, plus a key check if it does. Then:
 - neither encrypts → plaintext session;
 - the peer encrypts and we have no key → the key dialog, which verifies the typed key against the peer's check before using it;
 - both encrypt and the peer's check opens with our key → encrypted session;
@@ -204,7 +205,7 @@ make test   # everything; the TLS suites too when built with TLS
 | `tests/test_unit.c` | C, ASan/UBSan | `proto.c`, `sha1.c`, `qr.c` |
 | `tests/test_qr_reference.py` | python-qrcode, jsQR | QR output bit for bit, plus decodability |
 | `tests/test_crypto.mjs` | `node --test` | `e2e.js`: keys, derivation, sealing, tampering, key checks |
-| `tests/test_qr_js.mjs` | `node --test` | `qr.js` against the C encoder, module for module |
+| `tests/test_qr_js.mjs` | `node --test` | `qr.js` against the C encoder, module for module, and its SVG |
 | `tests/test_integration.py` | Python stdlib | Black-box HTTP/WebSocket against the binary; `--tls` runs it over verified TLS |
 | `tests/e2e.mjs` | Playwright | Desktop page + emulated iPhone + Android, real transfers; `--tls` too |
 

@@ -40,8 +40,13 @@ test('join links with a key, as the page encodes them', () => {
   }
 });
 
-test('svg output', () => {
-  const s = QR.svg('hello');
-  assert.match(s, /^<svg xmlns="http:\/\/www.w3.org\/2000\/svg" viewBox="0 0 29 29"/);
+test('the SVG draws exactly the dark modules, inside a 4-module quiet zone', () => {
+  const text = 'https://192.168.1.20:8443/?s=ABC123#k=K7PQ2M9XAB3HJWERT5VC';
+  const q = QR.encode(text), svg = QR.svg(text), dim = q.size + 8;
+  assert.ok(svg.includes(`viewBox="0 0 ${dim} ${dim}"`));
+  const drawn = Array.from({ length: q.size }, () => new Uint8Array(q.size));
+  for (const [, x, y, run] of svg.matchAll(/M(\d+),(\d+)h(\d+)v1h-\3z/g))
+    for (let i = 0; i < +run; i++) drawn[y - 4][x - 4 + i] = 1;
+  assert.deepEqual(drawn, q.mod);
   assert.throws(() => QR.encode(randomBytes(3000)), /too long/);
 });

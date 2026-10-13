@@ -124,6 +124,17 @@ const recordFrames = () => {
   window.__sent = async () => (await Promise.all(window.__frames.out)).map((f) => (typeof f === 'string' ? JSON.parse(f).type : f.byteLength));
 };
 
+// Decodes the page's QR code image, as a phone camera would.
+async function scanQR(page) {
+  await page.addScriptTag({ path: jsqr.file });
+  return page.evaluate(() => {
+    const c = document.createElement('canvas'); c.width = c.height = 400;
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 400, 400); g.drawImage(document.getElementById('qr'), 0, 0, 400, 400);
+    const r = window.jsQR(g.getImageData(0, 0, 400, 400).data, 400, 400);
+    return r && r.data;
+  });
+}
+
 const row = (page, list, name) => page.locator(`#${list} .item`, { has: page.locator('.name', { hasText: name }) });
 
 try {
@@ -156,14 +167,7 @@ try {
   // ---------- "scan" the QR code from the rendered image ----------
   let scanned = joinUrl;
   if (jsqr) {
-    await A.addScriptTag({ path: jsqr.file });
-    scanned = await A.evaluate(() => {
-      const img = document.getElementById('qr');
-      const c = document.createElement('canvas'); c.width = c.height = 400;
-      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 400, 400); g.drawImage(img, 0, 0, 400, 400);
-      const r = window.jsQR(g.getImageData(0, 0, 400, 400).data, 400, 400);
-      return r && r.data;
-    });
+    scanned = await scanQR(A);
     assert(scanned === joinUrl, `QR decodes to join URL (${scanned} vs ${joinUrl})`);
     ok('QR code scans to the join URL', scanned);
   } else console.log('  --  jsqr not installed, skipping QR scan check');
@@ -636,12 +640,7 @@ try {
     const link = await H.textContent('#link');
     assert(link.endsWith('#k=' + key.replace(/-/g, '')), 'link carries the key after #: ' + link);
     if (jsqr) {
-      await H.addScriptTag({ path: jsqr.file });
-      const qr = await H.evaluate(() => {
-        const c = document.createElement('canvas'); c.width = c.height = 400;
-        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 400, 400); g.drawImage(document.getElementById('qr'), 0, 0, 400, 400);
-        const r = window.jsQR(g.getImageData(0, 0, 400, 400).data, 400, 400); return r && r.data;
-      });
+      const qr = await scanQR(H);
       assert(qr === link, `QR code scans to the link with the key (${qr})`);
     }
     // the phone opens the link from the QR code

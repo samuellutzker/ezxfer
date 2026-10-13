@@ -14,7 +14,7 @@ ifeq ($(TLS),1)
 endif
 LIBSRCS := src/proto.c src/sha1.c src/qr.c
 
-.PHONY: all clean test test-unit test-crypto test-qr test-integration test-integration-tls test-e2e test-e2e-tls
+.PHONY: all clean test test-unit test-js test-qr test-integration test-integration-tls test-e2e test-e2e-tls
 
 all: ezxfer
 
@@ -53,7 +53,8 @@ $(BUILD)/qrgen: tests/qrgen.c $(LIBSRCS) src/*.h | $(BUILD)
 test-unit: $(BUILD)/test_unit
 	$(BUILD)/test_unit
 
-test-crypto: $(BUILD)/qrgen
+# web/e2e.js and web/qr.js (qr.js is compared with the C encoder)
+test-js: $(BUILD)/qrgen
 	node --test tests/test_crypto.mjs tests/test_qr_js.mjs
 
 # needs: pip install qrcode; (cd tests && npm install) for the jsQR decode check
@@ -72,7 +73,7 @@ test-e2e: ezxfer
 test-e2e-tls: ezxfer
 	node tests/e2e.mjs ./ezxfer --tls
 
-test: test-unit test-crypto test-qr test-integration test-e2e $(if $(filter 1,$(TLS)),test-integration-tls test-e2e-tls)
+test: test-unit test-js test-qr test-integration test-e2e $(if $(filter 1,$(TLS)),test-integration-tls test-e2e-tls)
 
 clean:
 	rm -rf $(BUILD) ezxfer

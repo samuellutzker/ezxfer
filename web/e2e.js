@@ -24,15 +24,13 @@
   const subtle = crypto && crypto.subtle;             // browsers only offer it on HTTPS / localhost
   const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 unambiguous symbols, 5 bits each
   const KEY_CHARS = 20;                                // 100 bits of randomness
-  const IV_BYTES = 12, TAG_BYTES = 16;
+  const IV_BYTES = 12, TAG_BYTES = 16, CHUNK_HEADER_BYTES = 12;
   const enc = new TextEncoder(), dec = new TextDecoder();
 
-  // Additional authenticated data separates the kinds of boxes, so one can't be
-  // passed off as another. File chunks use their 12-byte header (transfer id,
-  // byte offset) instead, which also ties each chunk to its place in the file.
+  // Additional authenticated data: "msg" for messages; file chunks use their
+  // 12-byte header (transfer id, byte offset), which ties each chunk to its
+  // place in the file. So neither can be passed off as the other.
   const AAD_MESSAGE = enc.encode('msg');
-  const AAD_CHECK = enc.encode('check');
-  const CHECK_TEXT = 'ezxfer key check';
 
   // The only type the page sends to the other device while encryption is on.
   // Only seal() below can make one: it alone holds SEAL.
@@ -86,6 +84,12 @@
 
   // ---- what the page uses ----
 
+  // A chunk header is always exactly 12 bytes, so it can never equal AAD_MESSAGE.
+  function chunkHeader(h) {
+    if (h.length !== CHUNK_HEADER_BYTES) throw new Error('bad chunk header');
+    return h;
+  }
+
   // The encrypted channel between this device (`me`) and the other one (`peer`),
   // both named by their client ids. Each direction gets its own AES-256 key,
   // derived with HKDF-SHA256 from the key text, salted with the session code and
@@ -101,19 +105,19 @@
       { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('ezxfer e2e v1|' + sessionCode), info: enc.encode(from + '>' + to) },
       ikm, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
     const [tx, rx] = await Promise.all([derive(me, peer), derive(peer, me)]);
+    const sealMessage = (obj) => seal(tx, enc.encode(JSON.stringify(obj)), AAD_MESSAGE);
+    const openMessage = async (box) => JSON.parse(dec.decode(await open(rx, box, AAD_MESSAGE)));
     return Object.freeze({
-      // JSON messages
-      sealMessage: (obj) => seal(tx, enc.encode(JSON.stringify(obj)), AAD_MESSAGE),
-      openMessage: async (box) => JSON.parse(dec.decode(await open(rx, box, AAD_MESSAGE))),
+      sealMessage, openMessage,  // JSON messages
       // File chunks: the header stays readable (the receiver needs it to find the
       // transfer) but is authenticated, so it can't be changed without detection.
-      sealChunk: (header, data) => seal(tx, data, header),
-      openChunk: (header, box) => open(rx, box, header),
-      // Handshake proof: a box only a device with the same key can open. Shows
+      sealChunk: async (header, data) => seal(tx, data, chunkHeader(header)),
+      openChunk: async (header, box) => open(rx, box, chunkHeader(header)),
+      // Handshake proof: a message only a device with the same key can open. Shows
       // that both devices have the same key without revealing anything about it.
-      makeCheck: async () => toB64((await seal(tx, enc.encode(CHECK_TEXT), AAD_CHECK)).bytes),
+      makeCheck: async () => toB64((await sealMessage({ type: 'key-check' })).bytes),
       async verifyCheck(b64) {
-        try { return dec.decode(await open(rx, fromB64(b64), AAD_CHECK)) === CHECK_TEXT; } catch (_) { return false; }
+        try { return (await openMessage(fromB64(b64))).type === 'key-check'; } catch (_) { return false; }
       },
     });
   }
