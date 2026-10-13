@@ -894,7 +894,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         fail(t, 'Download cancelled');
       }
     };
-    const url = '/dl/' + randomHex(8) + '/' + encodeURIComponent(t.name);
+    // No file name in the URL: if the worker doesn't answer, the request goes to the server.
+    // The worker names the download itself (Content-Disposition).
+    const url = '/dl/' + randomHex(16);
     reg.active.postMessage({ type: 'register', path: url, name: t.name, size: t.size, mime: t.mime }, [port2]);
     const frame = el('iframe');
     frame.hidden = true;

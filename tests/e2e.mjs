@@ -472,6 +472,7 @@ try {
   const droidCtx = await browser.newContext({ ...devices['Pixel 7'], acceptDownloads: true, ignoreHTTPSErrors: true });
   await droidCtx.addInitScript(() => { delete window.showSaveFilePicker; });  // as on Android Chrome
   const P = await droidCtx.newPage(); watch(P, 'android');
+  const droidUrls = []; P.on('request', (r) => droidUrls.push(r.url()));
   await P.goto(`${SCHEME}://127.0.0.1:${port}/?s=${session}`);
   await P.waitForFunction(() => document.body.classList.contains('connected'));
   await A.waitForFunction(() => document.getElementById('peerName').textContent === 'Android phone');
@@ -490,6 +491,7 @@ try {
   assert(apkDl.suggestedFilename() === 'app-release.apk', 'streamed filename ' + apkDl.suggestedFilename());
   const gotApk = fs.readFileSync(await apkDl.path());
   assert(gotApk.length === 40 * 1024 * 1024 && sha(gotApk) === apkSha, 'streamed download identical');
+  assert(!droidUrls.some((u) => u.includes('app-release')), 'file name in a request URL: ' + droidUrls.filter((u) => u.includes('app-release')));
   await row(A, 'outList', 'app-release.apk').locator('.st-done').waitFor();
   const heap = await P.evaluate(() => performance.memory ? performance.memory.usedJSHeapSize : 0);
   fs.unlinkSync(apkPath);
@@ -630,7 +632,8 @@ try {
     await transfer(H, P, NAME, down);
     await transfer(P, H, 'reply-' + NAME, up);
     for (const pg of [H, P]) {
-      const leaks = await pg.evaluate((n) => window.__leaks(n), [MARK, NAME, 'offer', 'accept', 'pdf', key, key.replace(/-/g, '')]);
+      // (5+ byte needles only: shorter ones occur by chance in megabytes of ciphertext)
+      const leaks = await pg.evaluate((n) => window.__leaks(n), [MARK, NAME, 'offer', 'accept', key, key.replace(/-/g, '')]);
       assert(leaks.length === 0, 'found on the wire: ' + leaks);
       const sent = await pg.evaluate(() => window.__sent());
       const types = new Set(sent.filter((t) => typeof t === 'string'));

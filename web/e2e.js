@@ -8,6 +8,16 @@
 //
 // Loaded by index.html as a classic script (sets window.E2E) and unit-tested in
 // tests/test_crypto.mjs.
+//
+// To check that the server can't read anything:
+// - The key is made in the browser, by newKey() below (crypto.getRandomValues).
+//   The server never sends one. index.html shows it on screen, puts it in the
+//   link after "#", and keeps it in sessionStorage; it never sends it.
+// - index.html writes to the network in exactly two places: toServer() (only
+//   "ping" and the handshake, whose key check is a sealed box) and wire(). In
+//   an encrypted session wire() throws on anything that isn't a Sealed box, and
+//   only seal() below can create one.
+// - The AES keys are derived inside channel() and never leave it.
 'use strict';
 (function (root) {
   const crypto = root.crypto;

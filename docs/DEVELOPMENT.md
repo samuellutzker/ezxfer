@@ -179,7 +179,7 @@ incoming: offered ─▶ saving ─▶ receiving ─▶ done
 
 Writes are chained on `t.chain`; acks are sent after each write.
 
-**Service worker** (`web/sw.js`). The page registers a download (name, size, type) and passes a `MessagePort`, then opens `/dl/<random>/<name>` in a hidden iframe. The worker answers that request with a streaming `Response` fed through the port. Each chunk is acknowledged only when the download has room, which is how backpressure reaches the sender. The page pings the worker every 10 s while a download is open, to keep it alive. The worker must stay a separate, root-level file: browsers don't register inline service workers, and its scope must cover `/dl/`.
+**Service worker** (`web/sw.js`). The page registers a download (name, size, type) and passes a `MessagePort`, then opens `/dl/<random>` in a hidden iframe (no file name in the URL, in case the request reaches the server). The worker answers that request with a streaming `Response` fed through the port. Each chunk is acknowledged only when the download has room, which is how backpressure reaches the sender. The page pings the worker every 10 s while a download is open, to keep it alive. The worker must stay a separate, root-level file: browsers don't register inline service workers, and its scope must cover `/dl/`.
 
 **Rendering.** `render(t)` marks a row dirty; `draw(t)` redraws it at most once per animation frame.
 
