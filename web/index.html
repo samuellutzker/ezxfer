@@ -245,7 +245,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     <h2>Enter the key</h2>
     <p>This session is end-to-end encrypted. Enter the key shown on the other device.</p>
     <label class="sr" for="keyInput">Key</label>
-    <input id="keyInput" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" autocapitalize="characters" spellcheck="false">
+    <input id="keyInput" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" maxlength="23" autocapitalize="characters" autocorrect="off" spellcheck="false">
     <div class="err" id="keyErr"></div>
     <div class="row"><button type="button" class="btn ghost" id="keyLeave">Leave</button><button class="btn primary">Connect</button></div>
   </form>
@@ -609,7 +609,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (!E2E.available) { setPill('off', 'Encrypted session: needs HTTPS'); return; }
     setPill('wait', 'Enter the key');
     $('keyErr').textContent = error;
-    if (!$('keyDialog').open) { $('keyInput').value = ''; $('keyDialog').showModal(); }
+    if (!$('keyDialog').open) { $('keyInput').value = ''; $('keyInput').dataset.chars = ''; $('keyDialog').showModal(); }
   }
 
   async function submitKey(e) {
@@ -1170,6 +1170,21 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (greeting) rxQueue = rxQueue.then(startHandshake);  // a device is already here: start over
   });
   $('keyForm').addEventListener('submit', submitKey);
+  // Shape the key while it's typed or pasted: capitals, a dash after every 5 characters.
+  $('keyInput').addEventListener('input', (e) => {
+    const input = e.target, keyChars = (t) => t.toUpperCase().match(/[A-HJ-NP-Z2-9]/g) || [];
+    const chars = keyChars(input.value);
+    let at = keyChars(input.value.slice(0, input.selectionStart)).length;  // key characters before the cursor
+    // Backspace that only removed a dash: remove the character before it instead.
+    if (e.inputType === 'deleteContentBackward' && chars.join('') === input.dataset.chars && at > 0) chars.splice(--at, 1);
+    chars.length = Math.min(chars.length, 20);
+    at = Math.min(at, chars.length);
+    input.value = chars.join('').replace(/(.{5})(?=.)/g, '$1-');
+    input.dataset.chars = chars.join('');
+    const caret = at + Math.floor(at / 5) - (at % 5 === 0 && at === chars.length && at > 0 ? 1 : 0);
+    input.setSelectionRange(caret, caret);
+    $('keyErr').textContent = '';
+  });
   $('keyDialog').addEventListener('cancel', (e) => e.preventDefault());  // Esc: choose Connect or Leave
   $('keyLeave').addEventListener('click', () => { $('keyDialog').close(); history.replaceState(null, '', location.pathname); leave(null); });
   $('leaveBtn').addEventListener('click', () => { history.replaceState(null, '', location.pathname); leave(null); });

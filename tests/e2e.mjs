@@ -662,6 +662,7 @@ try {
 
     // an encrypted transfer resumes after the connection drops
     const resumeBuf = randomBytes(24 * 1024 * 1024);
+    await H.evaluate(() => { window.__writeRate = 8e6; });  // slow enough to still be running when the connection drops
     await P.setInputFiles('#fileInput', { name: 'resume.bin', mimeType: 'application/octet-stream', buffer: resumeBuf });
     await row(H, 'inList', 'resume.bin').getByRole('button', { name: 'Accept' }).click();
     await H.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'resume.bin') || {}).bytes > 6e6);
@@ -669,6 +670,7 @@ try {
     await H.waitForFunction(() => window.__saved['resume.bin'], null, { timeout: 60000 });
     assert((await H.evaluate(() => window.__saved['resume.bin'].sha)) === sha(resumeBuf), 'resumed encrypted transfer intact');
     assert((await H.evaluate(() => window.ezxfer.resumes)) >= 1, 'resumed');
+    await H.evaluate(() => { window.__writeRate = 0; });
     ok('encrypted transfer resumes after a dropped connection; bytes identical');
 
     // the phone reloads: it keeps the key (the link no longer has it) and reconnects encrypted
@@ -695,7 +697,17 @@ try {
     await J.fill('#keyInput', E2E_wrongKey(key2));
     await J.click('#keyForm button.primary');
     await J.locator('#keyErr', { hasText: 'doesn’t match' }).waitFor();
-    await J.fill('#keyInput', key2.toLowerCase().replace(/-/g, ' '));
+    // typed without dashes, they appear as you type; Backspace after a dash takes the character before it
+    await J.fill('#keyInput', '');
+    await J.locator('#keyInput').pressSequentially(key2.replace(/-/g, '').slice(0, 11).toLowerCase());
+    assert((await J.inputValue('#keyInput')) === key2.slice(0, 13), 'formatted while typing: ' + await J.inputValue('#keyInput'));
+    await J.locator('#keyInput').press('Backspace');
+    await J.locator('#keyInput').press('Backspace');
+    assert((await J.inputValue('#keyInput')) === key2.slice(0, 10), 'backspace over the dash: ' + await J.inputValue('#keyInput'));
+    await J.locator('#keyInput').pressSequentially(key2.replace(/-/g, '').slice(9));
+    assert((await J.inputValue('#keyInput')) === key2, 'complete key: ' + await J.inputValue('#keyInput'));
+    await J.fill('#keyInput', key2.toLowerCase().replace(/-/g, ' '));  // pasted in another form
+    assert((await J.inputValue('#keyInput')) === key2, 'pasted key normalized');
     await J.click('#keyForm button.primary');
     await J.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
     await H2.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
