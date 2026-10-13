@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Compare the C QR encoder module-for-module against the `qrcode` reference
+"""Compare the page's QR encoder (web/qr.js) module-for-module against the `qrcode` reference
 encoder (a test-only dependency: pip install qrcode) for random data across
 all versions, error-correction levels and masks. If a jsQR decoder script is
 given, every symbol is also decoded and checked against the input.
 
-Usage: python3 tests/test_qr_reference.py build/qrgen [path/to/decode.cjs]
+Usage: python3 tests/test_qr_reference.py tests/qrgen.cjs [path/to/decode.cjs]
 """
 import random
 import subprocess
@@ -17,7 +17,7 @@ except ImportError:
     print("qrcode not installed (pip install qrcode) - skipping reference comparison")
     sys.exit(0)
 
-QRGEN = sys.argv[1] if len(sys.argv) > 1 else "build/qrgen"
+QRGEN = sys.argv[1] if len(sys.argv) > 1 else "tests/qrgen.cjs"
 DECODER = sys.argv[2] if len(sys.argv) > 2 else None
 ECL = "LMQH"
 QRCODE_ECL = {0: qrcode.constants.ERROR_CORRECT_L, 1: qrcode.constants.ERROR_CORRECT_M,
@@ -25,7 +25,7 @@ QRCODE_ECL = {0: qrcode.constants.ERROR_CORRECT_L, 1: qrcode.constants.ERROR_COR
 
 
 def ours(data: bytes, ecl: int, mask: int):
-    out = subprocess.run([QRGEN, str(ecl), str(mask)], input=data, capture_output=True, check=True).stdout
+    out = subprocess.run(["node", QRGEN, str(ecl), str(mask)], input=data, capture_output=True, check=True).stdout
     lines = out.decode().split("\n")
     version, used_ecl, used_mask = map(int, lines[0].split())
     rows = [tuple(int(c) for c in line) for line in lines[1:] if line]

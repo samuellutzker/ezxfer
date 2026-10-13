@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "server.h"
 #include "proto.h"
-#include "qr.h"
 #include "tls.h"
 #include "index_html.h"
 #include "sw_js.h"
@@ -198,7 +197,7 @@ static int is_local_host(const char *h)
            strcmp(h, "[::1]") == 0 || strcmp(h, "0.0.0.0") == 0;
 }
 
-/* Host headers end up in JSON, a URL and a QR code: accept only name/IP chars. */
+/* Host headers end up in JSON and the join URL: accept only name/IP chars. */
 static int plausible_host(const char *h)
 {
     return *h && strspn(h, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]") ==
@@ -902,33 +901,6 @@ static int open_listener(const server_config *cfg)
     return fd;
 }
 
-/* Compact (default): two modules per line with half-block glyphs; some terminals
- * (e.g. macOS Terminal) leave gaps between lines. Full: each module is two
- * spaces with a black or white background, which fills the whole cell including
- * the line spacing, so it renders everywhere, at twice the height. */
-static void print_terminal_qr(const qr_code *qr, int full)
-{
-    const int border = 2;
-    for (int y = -border; y < qr->size + border; y += full ? 1 : 2) {
-        printf(full ? "  " : "  \033[30;107m");
-        for (int x = -border, cur = -1; x < qr->size + border; x++) {
-            if (full) {
-                int dark = qr_module(qr, x, y);
-                if (dark != cur)
-                    fputs(dark ? "\033[40m" : "\033[107m", stdout);
-                cur = dark;
-                fputs("  ", stdout);
-            } else {
-                int top = qr_module(qr, x, y), bot = qr_module(qr, x, y + 1);
-                fputs(top && bot ? "\xe2\x96\x88" : top ? "\xe2\x96\x80" : bot ? "\xe2\x96\x84" : " ",
-                      stdout);
-            }
-        }
-        printf("\033[0m\n");
-    }
-    printf("\n");
-}
-
 static void print_banner(const server_config *cfg)
 {
     char origin[320];
@@ -936,13 +908,6 @@ static void print_banner(const server_config *cfg)
     printf("\n  ezxfer %s - browser file transfer\n\n", EZX_VERSION);
     printf("  Open on this computer:  %s://localhost:%d/\n", g_tls ? "https" : "http", cfg->port);
     printf("  Open on other devices:  %s/\n\n", origin);
-    if (cfg->print_qr) {
-        char url[340];
-        snprintf(url, sizeof url, "%s/", origin);
-        static qr_code qr;
-        if (qr_encode((const uint8_t *)url, strlen(url), QR_ECC_L, 0, -1, &qr) == 0)
-            print_terminal_qr(&qr, cfg->print_qr == 2);
-    }
     fflush(stdout);
 }
 

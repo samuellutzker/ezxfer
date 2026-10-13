@@ -23,7 +23,7 @@ make
 ./ezxfer
 ```
 
-Open `http://localhost:8080` on the computer and scan the QR code with your phone. The server prints the address for other devices and a QR code in the terminal as well.
+Open `http://localhost:8080` on the computer and scan the QR code with your phone. The server also prints the address for other devices.
 
 It builds with gcc or clang on Linux and macOS. `make` uses OpenSSL if it's installed; `make TLS=0` builds without it.
 
@@ -31,7 +31,7 @@ It builds with gcc or clang on Linux and macOS. `make` uses OpenSSL if it's inst
 Options:
   -p, --port PORT    TCP port to listen on (default 8080)
   -b, --bind ADDR    IPv4 address to bind (default 0.0.0.0)
-  -u, --url URL      public base URL encoded in QR codes
+  -u, --url URL      public base URL for join links and QR codes
                      (default: http://<lan-ip>:<port>)
   -w, --web FILE     serve FILE as the page template instead of the
                      built-in one ({{VERSION}} and {{BUILD}} are
@@ -43,10 +43,6 @@ Options:
   -t, --session-timeout SECONDS
                      how long a session waits for its devices to
                      reconnect after both dropped (default 120)
-      --no-qr        don't print a QR code in the terminal
-      --full-qr      print the terminal QR code at full height, for
-                     terminals that show gaps in the compact one
-                     (e.g. macOS Terminal)
   -q, --quiet        no banner or logging
   -h, --help         show this help
 ```

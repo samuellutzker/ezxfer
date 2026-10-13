@@ -1,6 +1,5 @@
-/* Unit tests for the protocol, crypto and QR modules. */
+/* Unit tests for the protocol and crypto modules. */
 #include "proto.h"
-#include "qr.h"
 #include "sha1.h"
 
 #include <stdio.h>
@@ -255,74 +254,6 @@ static void test_query(void)
     CHECK(query_param("a=0123456789", "a", out, 5) == -1); /* does not fit */
 }
 
-static int finder_ok(const qr_code *q, int x0, int y0)
-{
-    for (int dy = 0; dy < 7; dy++)
-        for (int dx = 0; dx < 7; dx++) {
-            int ring = dx == 0 || dy == 0 || dx == 6 || dy == 6;
-            int core = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
-            if (qr_module(q, x0 + dx, y0 + dy) != (ring || core))
-                return 0;
-        }
-    return 1;
-}
-
-static void test_qr(void)
-{
-    static qr_code q;
-    /* Byte-mode capacities: (version, ecl) -> max bytes */
-    struct { int ver, ecl, cap; } caps[] = {
-        {1, QR_ECC_L, 17}, {1, QR_ECC_M, 14}, {1, QR_ECC_Q, 11}, {1, QR_ECC_H, 7},
-        {2, QR_ECC_M, 26}, {5, QR_ECC_Q, 60}, {10, QR_ECC_M, 213}, {10, QR_ECC_L, 271},
-        {25, QR_ECC_H, 535}, {40, QR_ECC_L, 2953}, {40, QR_ECC_H, 1273},
-    };
-    static uint8_t data[3000];
-    for (size_t i = 0; i < sizeof data; i++)
-        data[i] = (uint8_t)('a' + i % 26);
-    for (size_t i = 0; i < sizeof caps / sizeof caps[0]; i++) {
-        CHECK(qr_encode(data, (size_t)caps[i].cap, caps[i].ecl, 0, -1, &q) == 0);
-        CHECK(q.version == caps[i].ver);
-        if (caps[i].ver < 40) {
-            CHECK(qr_encode(data, (size_t)caps[i].cap + 1, caps[i].ecl, 0, -1, &q) == 0);
-            CHECK(q.version == caps[i].ver + 1);
-        } else {
-            CHECK(qr_encode(data, (size_t)caps[i].cap + 1, caps[i].ecl, 0, -1, &q) == -1);
-        }
-    }
-
-    /* Structure: size, finder patterns, timing, dark module */
-    const char *url = "http://192.168.1.23:8080/?s=K7PQ2M";
-    CHECK(qr_encode((const uint8_t *)url, strlen(url), QR_ECC_M, 1, -1, &q) == 0);
-    CHECK(q.size == 17 + 4 * q.version);
-    CHECK(q.ecl >= QR_ECC_M);
-    CHECK(q.mask >= 0 && q.mask <= 7);
-    CHECK(finder_ok(&q, 0, 0));
-    CHECK(finder_ok(&q, q.size - 7, 0));
-    CHECK(finder_ok(&q, 0, q.size - 7));
-    int timing = 1;
-    for (int i = 8; i < q.size - 8; i++)
-        timing &= qr_module(&q, i, 6) == (i % 2 == 0) && qr_module(&q, 6, i) == (i % 2 == 0);
-    CHECK(timing);
-    CHECK(qr_module(&q, 8, q.size - 8) == 1);
-
-    /* Forced masks are honoured and change the symbol */
-    static qr_code a, b;
-    CHECK(qr_encode((const uint8_t *)url, strlen(url), QR_ECC_M, 0, 2, &a) == 0 && a.mask == 2);
-    CHECK(qr_encode((const uint8_t *)url, strlen(url), QR_ECC_M, 0, 5, &b) == 0 && b.mask == 5);
-    CHECK(memcmp(a.mod, b.mod, sizeof a.mod) != 0);
-
-    /* Boost raises ECC level when it fits in the same version */
-    CHECK(qr_encode((const uint8_t *)"hi", 2, QR_ECC_L, 1, -1, &q) == 0);
-    CHECK(q.version == 1 && q.ecl == QR_ECC_H);
-    CHECK(qr_encode((const uint8_t *)"hi", 2, QR_ECC_L, 0, -1, &q) == 0 && q.ecl == QR_ECC_L);
-    CHECK(qr_encode((const uint8_t *)"", 0, QR_ECC_M, 0, -1, &q) == 0 && q.version == 1);
-
-    /* Version information is present from version 7 on */
-    CHECK(qr_encode(data, 200, QR_ECC_L, 0, -1, &q) == 0 && q.version >= 7);
-    CHECK(finder_ok(&q, q.size - 7, 0));
-    CHECK(qr_encode(data, 10, 9, 0, -1, &q) == -1); /* bad ecl */
-}
-
 int main(void)
 {
     test_sha1();
@@ -331,7 +262,6 @@ int main(void)
     test_ws_frames();
     test_http();
     test_query();
-    test_qr();
     printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -25,11 +25,10 @@ How the code fits together, and what to know before changing it. User-facing doc
 | `src/proto.c` | Pure parsing: HTTP request head, query strings, WebSocket frames (unit-tested) |
 | `src/tls.c` | OpenSSL behind a tiny non-blocking API (`tls_read/write/handshake/pending`) |
 | `src/sha1.c` | SHA-1 + Base64 for the WebSocket handshake |
-| `src/qr.c` | QR encoder (byte mode, versions 1–40), for the terminal |
 | `web/index.html` | The whole app: HTML, CSS and one IIFE script |
 | `web/sw.js` | Service worker for streamed downloads |
 | `web/e2e.js` | End-to-end encryption: keys, key derivation, sealing and opening |
-| `web/qr.js` | `src/qr.c` ported to JavaScript, for the page's QR code |
+| `web/qr.js` | QR encoder (byte mode, versions 1–40) for the page's QR code |
 | `tools/embed.c` | Turns a file into a C byte array at build time |
 | `tests/` | Unit, QR reference, integration and browser tests (see [Tests](#tests)) |
 | `docs/` | This guide and the README screenshots |
@@ -202,10 +201,10 @@ make test   # everything; the TLS suites too when built with TLS
 
 | Suite | Tool | What it covers |
 |---|---|---|
-| `tests/test_unit.c` | C, ASan/UBSan | `proto.c`, `sha1.c`, `qr.c` |
-| `tests/test_qr_reference.py` | python-qrcode, jsQR | QR output bit for bit, plus decodability |
+| `tests/test_unit.c` | C, ASan/UBSan | `proto.c`, `sha1.c` |
+| `tests/test_qr_reference.py` | python-qrcode, jsQR | `qr.js` output bit for bit, plus decodability |
 | `tests/test_crypto.mjs` | `node --test` | `e2e.js`: keys, derivation, sealing, tampering, key checks |
-| `tests/test_qr_js.mjs` | `node --test` | `qr.js` against the C encoder, module for module, and its SVG |
+| `tests/test_qr_js.mjs` | `node --test` | `qr.js`: capacities, structure, levels and masks, its SVG |
 | `tests/test_integration.py` | Python stdlib | Black-box HTTP/WebSocket against the binary; `--tls` runs it over verified TLS |
 | `tests/e2e.mjs` | Playwright | Desktop page + emulated iPhone + Android, real transfers; `--tls` too |
 
@@ -215,7 +214,7 @@ What the suites cover, beyond the basics:
 - **Unit:**
   - SHA-1/Base64 vectors, the RFC 6455 examples and all frame-length encodings;
   - unmasking checked against the byte-wise definition at every length and alignment;
-  - HTTP and query parsing, the QR capacity table and structure.
+  - HTTP and query parsing.
 - **QR:** about 190 symbols across versions 1–40, all ECC levels and masks, matched module for module against python-qrcode and decoded by jsQR.
 - **Integration** (plain and `--tls`):
   - routes and errors;
