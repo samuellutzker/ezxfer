@@ -699,7 +699,11 @@ try {
     await J.locator('#keyErr', { hasText: 'doesn’t match' }).waitFor();
     // typed without dashes, they appear as you type; Backspace after a dash takes the character before it
     await J.fill('#keyInput', '');
-    await J.locator('#keyInput').pressSequentially(key2.replace(/-/g, '').slice(0, 11).toLowerCase());
+    await J.locator('#keyInput').pressSequentially(key2.replace(/-/g, '').slice(0, 5).toLowerCase());
+    assert((await J.inputValue('#keyInput')) === key2.slice(0, 6), 'dash added after 5 characters: ' + await J.inputValue('#keyInput'));
+    await J.locator('#keyInput').press('-');  // typing the dash anyway changes nothing
+    assert((await J.inputValue('#keyInput')) === key2.slice(0, 6), 'no double dash: ' + await J.inputValue('#keyInput'));
+    await J.locator('#keyInput').pressSequentially(key2.replace(/-/g, '').slice(5, 11).toLowerCase());
     assert((await J.inputValue('#keyInput')) === key2.slice(0, 13), 'formatted while typing: ' + await J.inputValue('#keyInput'));
     await J.locator('#keyInput').press('Backspace');
     await J.locator('#keyInput').press('Backspace');

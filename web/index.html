@@ -1170,18 +1170,18 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (greeting) rxQueue = rxQueue.then(startHandshake);  // a device is already here: start over
   });
   $('keyForm').addEventListener('submit', submitKey);
-  // Shape the key while it's typed or pasted: capitals, a dash after every 5 characters.
+  // Shape the key while it's typed or pasted: capitals, and a dash as soon as a group of 5 is complete.
   $('keyInput').addEventListener('input', (e) => {
     const input = e.target, keyChars = (t) => t.toUpperCase().match(/[A-HJ-NP-Z2-9]/g) || [];
     const chars = keyChars(input.value);
     let at = keyChars(input.value.slice(0, input.selectionStart)).length;  // key characters before the cursor
-    // Backspace that only removed a dash: remove the character before it instead.
+    // Backspace that only removed a dash (e.g. the one just added): remove the character before it.
     if (e.inputType === 'deleteContentBackward' && chars.join('') === input.dataset.chars && at > 0) chars.splice(--at, 1);
     chars.length = Math.min(chars.length, 20);
     at = Math.min(at, chars.length);
-    input.value = chars.join('').replace(/(.{5})(?=.)/g, '$1-');
+    input.value = chars.join('').replace(/.{5}/g, '$&-').slice(0, 23);  // no dash after the last group
     input.dataset.chars = chars.join('');
-    const caret = at + Math.floor(at / 5) - (at % 5 === 0 && at === chars.length && at > 0 ? 1 : 0);
+    const caret = at + Math.floor(Math.min(at, 19) / 5);  // after the dash that follows a full group
     input.setSelectionRange(caret, caret);
     $('keyErr').textContent = '';
   });
