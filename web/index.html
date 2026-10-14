@@ -84,7 +84,6 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 @keyframes spin { to { transform: rotate(360deg); } }
 .code-row { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 6px; gap: 10px; }
 .code { font: 600 26px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .18em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.link { font-size: 12.5px; color: var(--muted); word-break: break-all; }
 .e2e { margin-top: 14px; padding: 12px 14px; border-radius: 14px; background: var(--faint); font-size: 13.5px; }
 .e2e label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; }
 .e2e input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
@@ -189,7 +188,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     <section class="card" id="connectCard">
       <div class="waiting-only">
         <h2>Connect a device</h2>
-        <p class="sub">Scan this code with your phone's camera, or open the link on another computer.</p>
+        <p class="sub">Scan this code with your phone's camera, or enter the session code on the other device.</p>
         <div class="qr-box"><div class="spinner" id="qrSpin"></div><img id="qr" alt="QR code to join this session"></div>
         <div class="code-row">
           <div>
@@ -200,7 +199,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
           </button>
         </div>
-        <div class="link" id="link"></div>
         <div class="e2e" id="e2eBox" hidden>
           <label><input type="checkbox" id="e2eToggle"> End-to-end encryption</label>
           <div class="key" id="keyBox" hidden>Key for joining by code<b id="keyText"></b></div>
@@ -645,16 +643,15 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     showJoinLink();
   }
 
-  // The join link and its QR code, drawn here: with encryption they carry the
-  // key after "#", which browsers never send to a server.
+  // The join link (in the QR code and copied by the copy button), drawn here:
+  // with encryption it carries the key after "#", which browsers never send to a server.
+  let joinLink = '';
   function showJoinLink() {
     if (!joinUrl) return;
-    const url = joinUrl + (keyText ? '#k=' + E2E.normalizeKey(keyText) : '');
-    $('link').textContent = url;
-    $('qr').src = 'data:image/svg+xml,' + encodeURIComponent(QR.svg(url));
+    joinLink = joinUrl + (keyText ? '#k=' + E2E.normalizeKey(keyText) : '');
+    $('qr').src = 'data:image/svg+xml,' + encodeURIComponent(QR.svg(joinLink));
     $('qrSpin').hidden = true;
   }
-  const joinLink = () => $('link').textContent;
 
   // The other device has its file picker open (it says so when the picker opens
   // and closes). A connection drop meanwhile is expected and not reported, unless
@@ -1174,11 +1171,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   });
   $('acceptAll').addEventListener('click', () => { for (const t of incoming.values()) if (t.state === 'offered') acceptIncoming(t); });
   $('copyBtn').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(joinLink()); toast('Link copied'); }
-    catch (_) {
-      const r = document.createRange(); r.selectNodeContents($('link'));
-      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
-      toast('Link selected — copy it manually');
+    try { await navigator.clipboard.writeText(joinLink); toast('Link copied'); }
+    catch (_) {  // no clipboard API (plain HTTP): the old way, else show it to copy by hand
+      const t = Object.assign(el('textarea'), { value: joinLink });
+      document.body.appendChild(t); t.select();
+      const copied = document.execCommand('copy'); t.remove();
+      if (copied) toast('Link copied'); else prompt('Copy this link:', joinLink);
     }
   });
   $('joinForm').addEventListener('submit', (e) => {
@@ -1224,7 +1222,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   // expose a tiny hook for automated tests
   window.ezxfer = {
-    get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; },
+    get session() { return session; }, get url() { return joinUrl; }, get joinLink() { return joinLink; }, get connected() { return peerConnected; },
     get resumes() { return resumes; }, get connections() { return connections; },
     get encrypted() { return peerConnected && !!chan; }, get rejected() { return rejected; },
     transfers: () => [...outgoing.values(), ...incoming.values()].map((t) => ({

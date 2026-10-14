@@ -634,10 +634,15 @@ try {
     const H = await ctx('e2e-host'), P = await ctx('e2e-peer');
     await H.goto(`${SCHEME}://127.0.0.1:${port}/`);
     await H.waitForFunction(() => window.ezxfer.session);
+    const toggleAt = (await H.locator('#e2eToggle').boundingBox()).y;
     await H.check('#e2eToggle');
+    assert((await H.locator('#e2eToggle').boundingBox()).y === toggleAt, 'the checkbox stays where it was');
     const key = (await H.textContent('#keyText')).trim();
     assert(/^[A-Z2-9]{5}(-[A-Z2-9]{5}){3}$/.test(key), 'key shown: ' + key);
-    const link = await H.textContent('#link');
+    const link = await H.evaluate(() => window.ezxfer.joinLink);
+    await H.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await H.click('#copyBtn');
+    assert((await H.evaluate(() => navigator.clipboard.readText())) === link, 'copy button copies the link with the key');
     assert(link.endsWith('#k=' + key.replace(/-/g, '')), 'link carries the key after #: ' + link);
     if (jsqr) {
       const qr = await scanQR(H);
