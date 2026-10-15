@@ -373,6 +373,14 @@ try {
   ok('sender drops mid-transfer, reconnects and resumes; bytes identical');
 
   // ---------- choosing files: a connection drop meanwhile is expected, not reported ----------
+  // (on either side: the phone itself doesn't announce reconnecting either)
+  const recordToasts = (page) => page.evaluate(() => {
+    window.__toasts = [];
+    new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => window.__toasts.push(n.textContent))))
+      .observe(document.getElementById('toasts'), { childList: true });
+  });
+  const reconnectToasts = (page) => page.evaluate(() => window.__toasts.filter((t) => /reconnect/i.test(t)));
+  await recordToasts(B);
   const [chooser] = await Promise.all([B.waitForEvent('filechooser'), B.click('#drop')]);
   await A.waitForFunction(() => document.getElementById('pillText').textContent === 'Choosing files…');
   // Android drops the connection while its picker is open and can't reconnect
@@ -392,6 +400,7 @@ try {
   assert((await A.evaluate(() => window.__saved['chosen.jpg'].sha)) === sha(chosen), 'chosen file intact');
   assert((await A.textContent('#pillText')) === 'Connected', 'pill back to connected');
   assert((await A.locator('.toast', { hasText: 'disconnected' }).count()) === 0, 'still no disconnect message');
+  assert((await reconnectToasts(B)).length === 0, 'the phone says nothing either: ' + await reconnectToasts(B));
   ok('connection lost while choosing files shows "Choosing files…", not a disconnect');
 
   // ...whereas losing the connection otherwise (e.g. app backgrounded) is reported
@@ -431,6 +440,7 @@ try {
   await B.evaluate(() => window.dispatchEvent(new Event('focus')));  // back from the prompt
   await A.waitForFunction(() => window.ezxfer.connected && document.getElementById('pillText').textContent === 'Connected');
   await row(A, 'outList', 'to-phone.pdf').locator('.st-done').waitFor();
+  assert((await reconnectToasts(B)).length === 0, 'the phone says nothing either: ' + await reconnectToasts(B));
   ok('phone choosing a save location: connection loss shows as "Choosing where to save…", not a disconnect');
 
   // without a prompt (page not left), the announcement is withdrawn after 3 s

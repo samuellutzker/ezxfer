@@ -434,6 +434,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       return;
     }
     if (intentionalClose) { failActive('Disconnected'); return; }
+    droppedPicking = ownPickerOpen() ? performance.now() : 0;
     pauseActive();
     setPill('off', 'Reconnecting…');
     setTimeout(() => { if (ws === sock) connect(session); }, reconnectDelay);
@@ -600,7 +601,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     setPeer(true);
     toPeer({ type: 'info', name: deviceName(), instance: instanceId });
     const g = greeting || {}; greeting = null;
-    if (g.same) { resumeWithPeer(); if (!g.wasPicking) toast('Device reconnected'); } else toast('Device connected');
+    if (g.same) { resumeWithPeer(); if (!g.wasPicking && !pickerDropQuiet()) toast('Device reconnected'); } else toast('Device connected');
+    droppedPicking = 0;
   }
 
   const KEY_MISMATCH = 'This key doesn’t match the other device’s';
@@ -732,7 +734,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (!peerConnected && !peerId) { toast('Connect a device first', true); return; }
     // Picked while the connection is briefly down (phones often drop it while
     // the file picker is open): offered as soon as the other device is back.
-    if (!peerConnected) toast('Reconnecting — the files will be offered when the other device is back');
+    if (!peerConnected && !pickerDropQuiet()) toast('Reconnecting — the files will be offered when the other device is back');
     for (const file of files) {
       const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0, base: 0, paused: false };
       outgoing.set(t.id, t);
@@ -1139,9 +1141,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (on) pickerAway = false;
     // always (re)announce a start: the other side forgets it when we reconnect
     if (picking === on && !on) return;
+    if (picking && !on) pickClosed = performance.now();
     picking = on;
     toPeer({ type: 'picking', active: on, what });
   }
+  // Our own connection dropping while our picker is open (or just closed: the drop
+  // is often noticed only then) is no news either. Like the other device, which
+  // only reports it after PICK_GRACE, say nothing about it until then.
+  let pickClosed = -Infinity, droppedPicking = 0;
+  const ownPickerOpen = () => picking || performance.now() - pickClosed < 10000;
+  const pickerDropQuiet = () => droppedPicking > 0 && performance.now() - droppedPicking < PICK_GRACE;
+
   // Starting a download may or may not make the browser ask where to save
   // (Chrome on Android does, depending on its settings). Announce it, and take it
   // back if the page wasn't left for a prompt within a few seconds.
