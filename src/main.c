@@ -11,12 +11,12 @@ static void usage(const char *prog)
             "Usage: %s [options]\n"
             "\n"
             "Serve a browser-based file transfer page. Open it on a computer, scan the\n"
-            "QR code with a phone and send files in either direction.\n"
+            "QR code it shows with a phone and send files in either direction.\n"
             "\n"
             "Options:\n"
             "  -p, --port PORT    TCP port to listen on (default 8080)\n"
             "  -b, --bind ADDR    IPv4 address to bind (default 0.0.0.0)\n"
-            "  -u, --url URL      public base URL encoded in QR codes\n"
+            "  -u, --url URL      public base URL for join links and QR codes\n"
             "                     (default: http://<lan-ip>:<port>)\n"
             "  -w, --web FILE     serve FILE as the page template instead of the\n"
             "                     built-in one ({{VERSION}} and {{BUILD}} are\n"
@@ -28,10 +28,6 @@ static void usage(const char *prog)
             "  -t, --session-timeout SECONDS\n"
             "                     how long a session waits for its devices to\n"
             "                     reconnect after both dropped (default 120)\n"
-            "      --no-qr        don't print a QR code in the terminal\n"
-            "      --full-qr      print the terminal QR code at full height, for\n"
-            "                     terminals that show gaps in the compact one\n"
-            "                     (e.g. macOS Terminal)\n"
             "  -q, --quiet        no banner or logging\n"
             "  -h, --help         show this help\n"
             "\n"
@@ -57,8 +53,7 @@ static int int_arg(const char *what, const char *v, long min, long max, int *out
 
 int main(int argc, char **argv)
 {
-    server_config cfg = {.bind_addr = "0.0.0.0", .port = 8080, .session_timeout = 120,
-                         .print_qr = 1};
+    server_config cfg = {.bind_addr = "0.0.0.0", .port = 8080, .session_timeout = 120};
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -81,10 +76,6 @@ int main(int argc, char **argv)
             str = &cfg.tls_cert;
         } else if (v && is_opt(a, "-k", "--key")) {
             str = &cfg.tls_key;
-        } else if (!strcmp(a, "--no-qr")) {
-            cfg.print_qr = 0;
-        } else if (!strcmp(a, "--full-qr")) {
-            cfg.print_qr = 2;
         } else if (is_opt(a, "-q", "--quiet")) {
             cfg.quiet = 1;
         } else if (is_opt(a, "-h", "--help")) {

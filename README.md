@@ -12,7 +12,7 @@ Send files between a computer and a phone, or any two devices, right from the br
 - **Both directions:** each device can send. Files show up on the other side with Accept / Decline.
 - **Large files:** data streams straight through and is never stored.
 - **Robust on phones:** transfers resume after a dropped connection, and the screen stays on while transferring.
-- **Optional HTTPS** with your own certificate.
+- **Optional HTTPS** with your own certificate, and with it optional **end-to-end encryption**: the server only relays data it can't read.
 - **A single small C program:** the web app is built in. It needs no dependencies, or only OpenSSL if you want HTTPS.
 - Responsive, with light and dark themes.
 
@@ -23,7 +23,7 @@ make
 ./ezxfer
 ```
 
-Open `http://localhost:8080` on the computer and scan the QR code with your phone. The server prints the address for other devices and a QR code in the terminal as well.
+Open `http://localhost:8080` on the computer and scan the QR code with your phone. The server also prints the address for other devices.
 
 It builds with gcc or clang on Linux and macOS. `make` uses OpenSSL if it's installed; `make TLS=0` builds without it.
 
@@ -31,7 +31,7 @@ It builds with gcc or clang on Linux and macOS. `make` uses OpenSSL if it's inst
 Options:
   -p, --port PORT    TCP port to listen on (default 8080)
   -b, --bind ADDR    IPv4 address to bind (default 0.0.0.0)
-  -u, --url URL      public base URL encoded in QR codes
+  -u, --url URL      public base URL for join links and QR codes
                      (default: http://<lan-ip>:<port>)
   -w, --web FILE     serve FILE as the page template instead of the
                      built-in one ({{VERSION}} and {{BUILD}} are
@@ -43,10 +43,6 @@ Options:
   -t, --session-timeout SECONDS
                      how long a session waits for its devices to
                      reconnect after both dropped (default 120)
-      --no-qr        don't print a QR code in the terminal
-      --full-qr      print the terminal QR code at full height, for
-                     terminals that show gaps in the compact one
-                     (e.g. macOS Terminal)
   -q, --quiet        no banner or logging
   -h, --help         show this help
 ```
@@ -66,6 +62,14 @@ mkcert -cert-file cert.pem -key-file key.pem 192.168.1.20 localhost
 ```
 
 Behind a reverse proxy that handles TLS (Caddy, nginx), run ezxfer without a certificate and pass `--url https://your.host`.
+
+## End-to-end encryption
+
+On HTTPS pages, tick **End-to-end encryption** before the other device connects. Files and file names are then encrypted in the browser (AES-256-GCM) with a key the server never sees.
+- **Scanning the QR code or opening the link** joins with the key; it's part of the link.
+- **Typing the session code** asks for the key shown under the QR code.
+
+The page itself is still served by ezxfer, so this protects against the relay and anything in between (e.g. a proxy), not against a modified server.
 
 ## Good to know
 

@@ -1,10 +1,11 @@
 #define _GNU_SOURCE
 #include "server.h"
 #include "proto.h"
-#include "qr.h"
 #include "tls.h"
 #include "index_html.h"
 #include "sw_js.h"
+#include "e2e_js.h"
+#include "qr_js.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -196,7 +197,7 @@ static int is_local_host(const char *h)
            strcmp(h, "[::1]") == 0 || strcmp(h, "0.0.0.0") == 0;
 }
 
-/* Host headers end up in JSON, a URL and a QR code: accept only name/IP chars. */
+/* Host headers end up in JSON and the join URL: accept only name/IP chars. */
 static int plausible_host(const char *h)
 {
     return *h && strspn(h, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]") ==
@@ -400,9 +401,9 @@ static char g_build[17];
 static void compute_build_id(void)
 {
     uint64_t h = 0xcbf29ce484222325ull; /* FNV-1a */
-    const uint8_t *parts[2] = {g_template ? (const uint8_t *)g_template : index_html, sw_js};
-    size_t lens[2] = {g_template ? g_template_len : index_html_len, sw_js_len};
-    for (int p = 0; p < 2; p++)
+    const uint8_t *parts[4] = {g_template ? (const uint8_t *)g_template : index_html, sw_js, e2e_js, qr_js};
+    size_t lens[4] = {g_template ? g_template_len : index_html_len, sw_js_len, e2e_js_len, qr_js_len};
+    for (int p = 0; p < 4; p++)
         for (size_t i = 0; i < lens[p]; i++)
             h = (h ^ parts[p][i]) * 0x100000001b3ull;
     snprintf(g_build, sizeof g_build, "%016llx", (unsigned long long)h);
@@ -436,28 +437,6 @@ static void serve_index(conn *c)
                  "Content-Security-Policy: default-src 'self'; img-src 'self' data: blob:; "
                  "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
                  "connect-src 'self' ws: wss:\r\n");
-}
-
-static void serve_qr(conn *c, const http_request *req)
-{
-    char data[1024];
-    int n = query_param(req->query, "d", data, sizeof data);
-    if (n <= 0) {
-        http_error(c, 400, "Bad Request");
-        return;
-    }
-    static qr_code qr;
-    if (qr_encode((const uint8_t *)data, (size_t)n, QR_ECC_M, 1, -1, &qr) != 0) {
-        http_error(c, 414, "URI Too Long");
-        return;
-    }
-    char *svg = qr_to_svg(&qr, 4);
-    if (!svg) {
-        http_error(c, 500, "Internal Server Error");
-        return;
-    }
-    http_respond(c, 200, "OK", "image/svg+xml", svg, strlen(svg), NULL);
-    free(svg);
 }
 
 /* Client ids are opaque tokens: [A-Za-z0-9_-], at most 64 characters. */
@@ -623,10 +602,12 @@ static void handle_http(conn *c)
     }
     if (strcmp(req.path, "/") == 0 || strcmp(req.path, "/index.html") == 0)
         serve_index(c);
-    else if (strcmp(req.path, "/qr.svg") == 0)
-        serve_qr(c, &req);
     else if (strcmp(req.path, "/sw.js") == 0)
         http_respond(c, 200, "OK", "text/javascript; charset=utf-8", sw_js, sw_js_len, NULL);
+    else if (strcmp(req.path, "/e2e.js") == 0)
+        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", e2e_js, e2e_js_len, NULL);
+    else if (strcmp(req.path, "/qr.js") == 0)
+        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", qr_js, qr_js_len, NULL);
     else if (strcmp(req.path, "/ws") == 0 && is_get)
         ws_upgrade(c, &req);
     else if (strcmp(req.path, "/health") == 0)
@@ -920,33 +901,6 @@ static int open_listener(const server_config *cfg)
     return fd;
 }
 
-/* Compact (default): two modules per line with half-block glyphs; some terminals
- * (e.g. macOS Terminal) leave gaps between lines. Full: each module is two
- * spaces with a black or white background, which fills the whole cell including
- * the line spacing, so it renders everywhere, at twice the height. */
-static void print_terminal_qr(const qr_code *qr, int full)
-{
-    const int border = 2;
-    for (int y = -border; y < qr->size + border; y += full ? 1 : 2) {
-        printf(full ? "  " : "  \033[30;107m");
-        for (int x = -border, cur = -1; x < qr->size + border; x++) {
-            if (full) {
-                int dark = qr_module(qr, x, y);
-                if (dark != cur)
-                    fputs(dark ? "\033[40m" : "\033[107m", stdout);
-                cur = dark;
-                fputs("  ", stdout);
-            } else {
-                int top = qr_module(qr, x, y), bot = qr_module(qr, x, y + 1);
-                fputs(top && bot ? "\xe2\x96\x88" : top ? "\xe2\x96\x80" : bot ? "\xe2\x96\x84" : " ",
-                      stdout);
-            }
-        }
-        printf("\033[0m\n");
-    }
-    printf("\n");
-}
-
 static void print_banner(const server_config *cfg)
 {
     char origin[320];
@@ -954,13 +908,6 @@ static void print_banner(const server_config *cfg)
     printf("\n  ezxfer %s - browser file transfer\n\n", EZX_VERSION);
     printf("  Open on this computer:  %s://localhost:%d/\n", g_tls ? "https" : "http", cfg->port);
     printf("  Open on other devices:  %s/\n\n", origin);
-    if (cfg->print_qr) {
-        char url[340];
-        snprintf(url, sizeof url, "%s/", origin);
-        static qr_code qr;
-        if (qr_encode((const uint8_t *)url, strlen(url), QR_ECC_L, 0, -1, &qr) == 0)
-            print_terminal_qr(&qr, cfg->print_qr == 2);
-    }
     fflush(stdout);
 }
 
