@@ -29,7 +29,7 @@
 #define MSG_NOSIGNAL 0 /* SIGPIPE is ignored globally */
 #endif
 
-#define EZX_VERSION "1.1.0"
+#define EZX_VERSION "1.2.0"
 
 #define MAX_CONNS 512
 #define MAX_SESSIONS 256

@@ -245,7 +245,7 @@ def http_index(srv):
     st, h, body = get(srv.port, "/")
     assert st == 200 and h["content-type"].startswith("text/html")
     assert int(h["content-length"]) == len(body)
-    assert b"<title>ezxfer</title>" in body and b"{{VERSION}}" not in body and b"v1.1.0" in body
+    assert b"<title>ezxfer</title>" in body and b"{{VERSION}}" not in body and b"v1.2.0" in body
     assert get(srv.port, "/index.html")[0] == 200
 
 
@@ -651,7 +651,7 @@ def test_options():
     srv = Server("--web", f.name)
     try:
         st, _, body = get(srv.port, "/")
-        assert st == 200 and body == b"<p>custom template 1.1.0 / 1.1.0</p>", body
+        assert st == 200 and body == b"<p>custom template 1.2.0 / 1.2.0</p>", body
     finally:
         srv.stop()
         os.unlink(f.name)
