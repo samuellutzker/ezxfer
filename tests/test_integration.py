@@ -257,7 +257,7 @@ def http_head(srv):
 
 @test
 def http_scripts(srv):
-    for path, marker in (("/sw.js", b"self.addEventListener"), ("/e2e.js", b"root.E2E"), ("/qr.js", b"root.QR")):
+    for path, marker in (("/sw.js", b"self.addEventListener"), ("/e2e.js", b"root.E2E"), ("/qr.js", b"root.QR"), ("/check.js", b"root.Check")):
         st, h, body = get(srv.port, path)
         assert st == 200 and h["content-type"].startswith("text/javascript") and marker in body, path
     assert get(srv.port, "/qr.svg?d=x")[0] == 404  # QR codes are drawn by the page: links with a key never reach the server

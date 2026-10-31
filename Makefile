@@ -27,16 +27,12 @@ $(BUILD)/embed: tools/embed.c | $(BUILD)
 $(BUILD)/index_html.h: web/index.html $(BUILD)/embed
 	$(BUILD)/embed $< index_html > $@
 
-$(BUILD)/sw_js.h: web/sw.js $(BUILD)/embed
-	$(BUILD)/embed $< sw_js > $@
+# the page's scripts, served as /<name>.js
+SCRIPTS := sw e2e qr check
+$(BUILD)/%_js.h: web/%.js $(BUILD)/embed
+	$(BUILD)/embed $< $*_js > $@
 
-$(BUILD)/e2e_js.h: web/e2e.js $(BUILD)/embed
-	$(BUILD)/embed $< e2e_js > $@
-
-$(BUILD)/qr_js.h: web/qr.js $(BUILD)/embed
-	$(BUILD)/embed $< qr_js > $@
-
-ezxfer: $(SRCS) src/*.h $(BUILD)/index_html.h $(BUILD)/sw_js.h $(BUILD)/e2e_js.h $(BUILD)/qr_js.h $(BUILD)/tls-$(TLS)
+ezxfer: $(SRCS) src/*.h $(BUILD)/index_html.h $(SCRIPTS:%=$(BUILD)/%_js.h) $(BUILD)/tls-$(TLS)
 	$(CC) $(CFLAGS) $(TLS_CFLAGS) -I$(BUILD) -o $@ $(SRCS) $(LDFLAGS) $(TLS_LIBS)
 
 # rebuild when switching between TLS=0 and TLS=1
@@ -50,9 +46,9 @@ $(BUILD)/test_unit: tests/test_unit.c $(LIBSRCS) src/*.h | $(BUILD)
 test-unit: $(BUILD)/test_unit
 	$(BUILD)/test_unit
 
-# web/e2e.js and web/qr.js
+# web/e2e.js, web/qr.js and web/check.js
 test-js:
-	node --test tests/test_crypto.mjs tests/test_qr_js.mjs
+	node --test tests/test_crypto.mjs tests/test_qr_js.mjs tests/test_check.mjs
 
 # needs: pip install qrcode; (cd tests && npm install) for the jsQR decode check
 test-qr:

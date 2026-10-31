@@ -154,7 +154,7 @@ body:not(.connected) .locked { display: block; }
 .status .st-warn { color: var(--warn); }
 .bar { height: 5px; border-radius: 99px; background: rgba(127,127,127,.18); overflow: hidden; margin-top: 7px; display: none; }
 .bar i { display: block; height: 100%; width: 0; background: var(--grad); border-radius: 99px; transition: width .2s; }
-.item.sending .bar, .item.receiving .bar, .item.finishing .bar { display: block; }
+.item.sending .bar, .item.receiving .bar, .item.finishing .bar, .item.checking .bar { display: block; }
 .item.paused .bar i { background: var(--warn); }
 .actions { display: flex; gap: 6px; }
 @media (max-width: 480px) {
@@ -251,11 +251,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
 <script src="/e2e.js"></script>
 <script src="/qr.js"></script>
+<script src="/check.js"></script>
 
 <script>
 'use strict';
 (function () {
-  const CHUNK = 1024 * 1024;             // bytes per binary message
+  const CHUNK = Check.CHUNK;             // bytes per binary message (1 MB; checksums are per chunk)
   const MAX_INFLIGHT = 16 * 1024 * 1024; // sent but not yet acknowledged by the receiver
   const ACK_EVERY = 1024 * 1024;
   const HDR = 12;                        // binary header: u32 transfer id, u64 byte offset
@@ -309,7 +310,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const sendQueue = [];
   let pumping = false;
   const OUT_ACTIVE = ['offered', 'sending', 'finishing'];  // states in which a transfer can still change
-  const IN_ACTIVE = ['offered', 'saving', 'receiving'];
+  const IN_ACTIVE = ['offered', 'saving', 'receiving', 'checking'];
 
   // ---------- utils ----------
   function fmtSize(n) {
@@ -568,7 +569,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') endOut(t, 'declined'); break; }
       case 'cancel': onCancel(m); break;
       case 'ack': { const t = outgoing.get(m.id); if (t && (t.state === 'sending' || t.state === 'finishing')) { t.acked = Math.min(t.size, Math.max(t.acked, +m.bytes || 0)); render(t); kickPump(); } break; }
-      case 'eof': onEof(m.id); break;
+      case 'eof': onEof(m); break;
       case 'done': { const t = outgoing.get(m.id); if (t && OUT_ACTIVE.includes(t.state)) { t.acked = t.size; endOut(t, 'done'); } break; }
     }
   }
@@ -680,8 +681,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   // Final states: done, declined, cancelled, failed (with t.error).
-  function endOut(t, state, error) { t.state = state; t.paused = false; t.error = error; render(t); kickPump(); }
-  function endIn(t, state, error) { abortWriter(t); t.state = state; t.paused = false; t.error = error; render(t); }
+  // (a transfer that has ended stays as it ended)
+  function endOut(t, state, error) { if (!OUT_ACTIVE.includes(t.state)) return; t.state = state; t.paused = false; t.error = error; render(t); kickPump(); }
+  function endIn(t, state, error) { if (!IN_ACTIVE.includes(t.state)) return; abortWriter(t); t.state = state; t.paused = false; t.error = error; render(t); }
 
   function failActive(reason) {
     for (const t of outgoing.values()) if (OUT_ACTIVE.includes(t.state)) endOut(t, 'failed', reason);
@@ -723,7 +725,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         toPeer({ type: 'accept', id: t.id, offset: t.received });
         render(t);
       } else if (t.state === 'declined') toPeer({ type: 'decline', id: t.id });
-      else if (t.state === 'cancelled' || t.state === 'failed') toPeer({ type: 'cancel', id: t.id, from: 'receiver' });
+      else if (t.state === 'cancelled' || t.state === 'failed') toPeer({ type: 'cancel', id: t.id, from: 'receiver', reason: t.error });
       else if (t.state === 'done') toPeer({ type: 'done', id: t.id });
     }
   }
@@ -736,7 +738,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     // the file picker is open): offered as soon as the other device is back.
     if (!peerConnected && !pickerDropQuiet()) toast('Reconnecting — the files will be offered when the other device is back');
     for (const file of files) {
-      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0, base: 0, paused: false };
+      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, crcs: [], state: 'offered', started: 0, base: 0, paused: false };
       outgoing.set(t.id, t);
       createRow(t, false);
       render(t);
@@ -755,12 +757,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     }
     if (!OUT_ACTIVE.includes(t.state)) return;
     const offset = Math.max(0, Math.min(t.size, Math.floor(+m.offset || 0)));
-    // Chunks are sent as file slices that the browser reads itself. If the file
-    // can't be read any more (deleted, access revoked), the browser would fail the
-    // whole connection instead, so check first.
-    try { await t.file.slice(offset, offset + 1).arrayBuffer(); }
-    catch (_) { endOut(t, 'failed', 'Could not read file'); toPeer({ type: 'cancel', id: t.id, from: 'sender' }); return; }
-    if (!OUT_ACTIVE.includes(t.state)) return;  // cancelled meanwhile
     t.sent = t.acked = t.base = offset;
     t.started = performance.now();
     t.state = 'sending'; t.paused = false;
@@ -789,19 +785,20 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           dv.setUint32(0, t.id);
           dv.setUint32(4, Math.floor(start / 4294967296));
           dv.setUint32(8, start >>> 0);
-          if (!keyText) wire(t.file.slice(start, end), hdr);  // read by the browser, no copy in JS
-          else {
-            const c = chan;
-            let box;
-            try { box = await c.sealChunk(hdr, new Uint8Array(await t.file.slice(start, end).arrayBuffer())); }
-            catch (_) { endOut(t, 'failed', 'Could not read file'); toPeer({ type: 'cancel', id: t.id, from: 'sender' }); break; }
-            if (c !== chan || ws !== sock || t.sent !== start || t.state !== 'sending' || t.paused) continue;  // changed meanwhile
-            wire(box, hdr);
-          }
+          // read the chunk (and seal it, with encryption), noting its checksum
+          const c = chan;
+          let data, box;
+          try {
+            data = new Uint8Array(await t.file.slice(start, end).arrayBuffer());
+            if (keyText) box = await c.sealChunk(hdr, data);
+          } catch (_) { endOut(t, 'failed', 'Could not read file'); toPeer({ type: 'cancel', id: t.id, from: 'sender' }); break; }
+          if (c !== chan || ws !== sock || t.sent !== start || t.state !== 'sending' || t.paused) continue;  // changed meanwhile
+          t.crcs[start / CHUNK] = Check.crc32(data);
+          wire(keyText ? box : data, hdr);
           t.sent = end;
           render(t);
         }
-        if (t.state === 'sending' && !t.paused && t.sent >= t.size) { toPeer({ type: 'eof', id: t.id }); t.state = 'finishing'; }
+        if (t.state === 'sending' && !t.paused && t.sent >= t.size) { toPeer({ type: 'eof', id: t.id, crc: Check.fingerprint(t.crcs, t.size) }); t.state = 'finishing'; }
         render(t);
         const qi = sendQueue.indexOf(t);
         if (qi >= 0) sendQueue.splice(qi, 1);
@@ -820,7 +817,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const id = m.id >>> 0;
     if (incoming.has(inKey(id))) return;
     const t = { id, peer: peerId, name: String(m.name || 'file').slice(0, 255), size: Math.max(0, +m.size || 0), mime: String(m.mime || ''),
-                received: 0, lastAck: 0, state: 'offered', writer: null, chain: Promise.resolve(), started: 0, base: 0, paused: false };
+                received: 0, lastAck: 0, crcs: [], checked: 0, state: 'offered', writer: null, chain: Promise.resolve(), started: 0, base: 0, paused: false };
     incoming.set(inKey(id), t);
     createRow(t, true);
     render(t);
@@ -849,6 +846,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (!writer && t.state === 'saving') writer = await streamWriter(t).catch(() => null);
     if (!writer && t.state === 'saving') writer = await storageWriter(t).catch(() => null);
     if (t.state !== 'saving') { if (writer) writer.abort().catch(() => {}); return; }
+    if (!writer && !memoryOnly && t.size > 1 << 30) toast('Not enough space in this browser’s storage: receiving into memory, which may fail', true);
     t.writer = writer || memoryWriter(t);
     t.via = t.writer.via || 'picker';
     if (t.via === 'picker') t.handle = handle;  // to open the saved file later
@@ -890,18 +888,23 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const { quota, usage } = await navigator.storage.estimate();
     if (quota - usage < t.size + (64 << 20)) return null;  // not enough room
     const dir = await navigator.storage.getDirectory(), name = 'rx-' + randomHex(8);
+    keepWhileOpen(name);
     const handle = await dir.getFileHandle(name, { create: true });
     const w = await handle.createWritable();
     return {
       via: 'storage',
-      write: (data) => w.write(data),
+      write: (data) => w.write(data.slice()),  // a plain copy: some browsers mishandle views into larger buffers
       async close() { await w.close(); return handle.getFile(); },
       async abort() { await w.abort().catch(() => {}); await dir.removeEntry(name).catch(() => {}); },
     };
   }
-  // Files stay in storage while the page is open (Save again, Open); clear those of earlier visits.
-  if (OPFS) navigator.storage.getDirectory().then(async (dir) => {
-    for await (const name of dir.keys()) if (name.startsWith('rx-')) dir.removeEntry(name).catch(() => {});
+  // Files stay in storage while their page is open (Save again, Open). Each page
+  // holds a lock per file; files nobody holds are left over from closed or
+  // crashed pages and are deleted.
+  const keepWhileOpen = (name) => navigator.locks && navigator.locks.request('ezxfer:' + name, () => new Promise(() => {}));
+  if (OPFS && navigator.locks) Promise.all([navigator.storage.getDirectory(), navigator.locks.query()]).then(async ([dir, locks]) => {
+    const held = new Set(locks.held.map((l) => l.name));
+    for await (const name of dir.keys()) if (name.startsWith('rx-') && !held.has('ezxfer:' + name)) dir.removeEntry(name).catch(() => {});
   }).catch(() => {});
 
   // The last resort: collect the file in memory. Every 64 MB the pieces become
@@ -987,7 +990,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   function declineIncoming(t) {
     if (t.state === 'offered' || t.state === 'saving') { endIn(t, 'declined'); toPeer({ type: 'decline', id: t.id }); }
-    else if (t.state === 'receiving') { endIn(t, 'cancelled'); toPeer({ type: 'cancel', id: t.id, from: 'receiver' }); }
+    else if (t.state === 'receiving' || t.state === 'checking') { endIn(t, 'cancelled'); toPeer({ type: 'cancel', id: t.id, from: 'receiver' }); }
   }
 
   function abortWriter(t) {
@@ -1005,6 +1008,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     // Only the next expected bytes are used; anything else is left over from
     // before a reconnect and the sender is already re-sending from t.received.
     if (dv.getUint32(4) * 4294967296 + dv.getUint32(8) !== t.received) return;
+    // chunks are 1 MB, the last one the rest: the checksums are per chunk
+    if (t.received % CHUNK || data.byteLength !== Math.min(CHUNK, t.size - t.received)) { fail(t, 'Received malformed data'); return; }
+    t.crcs[t.received / CHUNK] = Check.crc32(data);
     t.received += data.byteLength;
     const got = t.received;
     if (t.received > t.size) { fail(t, 'Received more data than announced'); return; }
@@ -1015,21 +1021,31 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function fail(t, reason) {
-    if (t.state !== 'receiving') return;
+    if (t.state !== 'receiving' && t.state !== 'checking') return;
     endIn(t, 'failed', reason);
-    toPeer({ type: 'cancel', id: t.id, from: 'receiver' });
+    toPeer({ type: 'cancel', id: t.id, from: 'receiver', reason });
   }
 
-  function onEof(id) {
-    const t = incoming.get(inKey(id));
+  // All data is in: check it, finish the file, read it back where possible and
+  // check that too. Only then is the file reported as received.
+  function onEof(m) {
+    const t = incoming.get(inKey(m.id));
     if (!t || t.state !== 'receiving') return;
     t.chain.then(async () => {
       // an early "eof" is a leftover from before a reconnect; the resumed stream ends with its own
       if (t.state !== 'receiving' || t.paused || t.received !== t.size) return;
-      const file = await t.writer.close();
-      t.writer = null;
-      if (file) { t.blob = file; t.url = URL.createObjectURL(file); download(t); }  // from storage or memory
+      t.state = 'checking'; render(t);  // from here on, a repeated eof or accept changes nothing
       ack(t, t.size);
+      if (Check.fingerprint(t.crcs, t.size) !== m.crc) { fail(t, 'Damaged on the way — please send it again'); return; }
+      const w = t.writer; t.writer = null;
+      const file = await w.close();  // from storage or memory; the other writers saved it themselves
+      const saved = file || (t.handle && await t.handle.getFile());
+      if (saved && !(await Check.verify(saved, t.crcs, t.size, (n) => { t.checked = n; render(t); }))) {
+        fail(t, 'The saved file is damaged — please send it again');
+        return;
+      }
+      if (t.state !== 'checking') return;  // cancelled meanwhile
+      if (file) { t.blob = file; t.url = URL.createObjectURL(file); download(t); }
       toPeer({ type: 'done', id: t.id });
       endIn(t, 'done');
     }).catch(() => fail(t, 'Could not save file'));
@@ -1064,10 +1080,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function onCancel(m) {
     if (m.from === 'sender') {
       const t = incoming.get(inKey(m.id));
-      if (t && IN_ACTIVE.includes(t.state)) endIn(t, 'cancelled');
+      if (t) endIn(t, 'cancelled');
     } else {
-      const t = outgoing.get(m.id);
-      if (t && OUT_ACTIVE.includes(t.state)) endOut(t, 'cancelled');
+      const t = outgoing.get(m.id);  // the receiver may say why (e.g. the data was damaged)
+      if (t) m.reason ? endOut(t, 'failed', String(m.reason).slice(0, 80)) : endOut(t, 'cancelled');
     }
   }
 
@@ -1076,7 +1092,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   let wakeLock = null, wakePending = false, wakeFailed = false, wakeHinted = false;
   function transfersBusy() {
     for (const t of outgoing.values()) if (t.state === 'sending' || t.state === 'finishing') return true;
-    for (const t of incoming.values()) if (t.state === 'receiving') return true;
+    for (const t of incoming.values()) if (t.state === 'receiving' || t.state === 'checking') return true;
     return false;
   }
   async function updateWakeLock() {
@@ -1140,7 +1156,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function draw(t) {
-    const out = !!t.file, bytes = out ? t.acked : t.received;
+    const out = !!t.file, bytes = out ? t.acked : t.state === 'checking' ? t.checked : t.received;
     t.ui.row.className = 'item ' + (out ? 'outgoing ' : 'incoming ') + t.state + (t.paused ? ' paused' : '');
     const pct = t.size ? Math.min(100, bytes / t.size * 100) : (t.state === 'done' ? 100 : 0);
     t.ui.fill.style.width = pct + '%';
@@ -1152,11 +1168,13 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       ? 'Waiting for the other device to accept' : 'Waiting for the other device to reconnect', size,
       !out && tooBigForMemory(t) && '⚠ Large for this browser']);
     else if (t.state === 'saving') setStatus(t, ['Choose where to save…', size]);
+    else if (t.state === 'checking') setStatus(t, ['Checking the file…', Math.floor(pct) + '%']);
+    else if (t.state === 'finishing' && t.acked >= t.size) setStatus(t, ['The other device is checking the file…', size]);
     else setStatus(t, [...progress, speed(t, bytes)]);  // sending, finishing, receiving
 
     const acts = out ? (OUT_ACTIVE.includes(t.state) ? [['Cancel', 'ghost', () => cancelOutgoing(t)]] : [])
       : t.state === 'offered' ? [['Decline', 'ghost', () => declineIncoming(t)], ['Accept', 'primary', () => acceptIncoming(t)]]
-      : t.state === 'receiving' ? [['Cancel', 'ghost', () => declineIncoming(t)]]
+      : t.state === 'receiving' || t.state === 'checking' ? [['Cancel', 'ghost', () => declineIncoming(t)]]
       : t.state === 'done' ? [...(canOpen(t) ? [['Open', 'ghost', () => openFile(t)]] : []), ...(t.url ? [['Save again', 'ghost', () => download(t)]] : [])]
       : [];
     const sig = acts.map((a) => a[0]).join();

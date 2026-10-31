@@ -74,7 +74,9 @@ const mockSavePicker = () => {
       return {
         write: async (d) => {
           if (window.__writeRate) await new Promise((r) => setTimeout(r, d.byteLength / window.__writeRate * 1000));
-          parts.push(new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d)); },
+          const bytes = new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d);
+          if (window.__corruptNextWrite && bytes.length) { window.__corruptNextWrite = false; bytes[0] ^= 1; }  // a faulty disk or browser
+          parts.push(bytes); },
         close: async () => {
           const blob = new Blob(parts);
           saved = new File(parts, suggestedName);
@@ -288,6 +290,28 @@ try {
   assert(await row(B, 'inList', 'holiday-video.mp4').getByRole('button', { name: 'Save again' }).isVisible(), 'Save again still offered');
   await shownB.close();
   ok('received images and videos open in a new tab (from disk or memory); HTML is not opened');
+
+  // ---------- damaged data is caught, not saved as if it were fine ----------
+  // on the way: one bit of one chunk flipped as it arrives at the phone
+  await B.evaluate(() => {
+    const sock = window.__sock, deliver = sock.onmessage;
+    let armed = true;
+    sock.onmessage = (e) => {
+      if (armed && e.data instanceof ArrayBuffer && e.data.byteLength > 1000) { armed = false; new Uint8Array(e.data)[500] ^= 1; }
+      deliver(e);
+    };
+  });
+  await A.setInputFiles('#fileInput', { name: 'flipped.bin', mimeType: 'application/octet-stream', buffer: randomBytes(2500000) });
+  await row(B, 'inList', 'flipped.bin').getByRole('button', { name: 'Accept' }).click();
+  await row(B, 'inList', 'flipped.bin').locator('.st-err', { hasText: 'Damaged on the way' }).waitFor();
+  await row(A, 'outList', 'flipped.bin').locator('.st-err', { hasText: 'Damaged on the way' }).waitFor();
+  // on writing: the desktop's save writes one wrong byte, which only reading the file back shows
+  await A.evaluate(() => { window.__corruptNextWrite = true; });
+  await B.setInputFiles('#fileInput', { name: 'badly-saved.bin', mimeType: 'application/octet-stream', buffer: randomBytes(1500000) });
+  await row(A, 'inList', 'badly-saved.bin').getByRole('button', { name: 'Accept' }).click();
+  await row(A, 'inList', 'badly-saved.bin').locator('.st-err', { hasText: 'saved file is damaged' }).waitFor();
+  await row(B, 'outList', 'badly-saved.bin').locator('.st-err', { hasText: 'saved file is damaged' }).waitFor();
+  ok('damage on the way or in the saved file is reported on both devices, not saved as received');
 
   // ---------- several files queued at once ----------
   const files = [1, 2, 3].map((i) => ({ name: `doc-${i}.pdf`, mimeType: 'application/pdf', buffer: randomBytes(400000 * i) }));

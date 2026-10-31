@@ -11,6 +11,7 @@ Send files between a computer and a phone, or any two devices, right from the br
 - **Pair by QR code** or by typing a 6-character session code.
 - **Both directions:** each device can send. Files show up on the other side with Accept / Decline.
 - **Large files:** data streams straight through and is never stored.
+- **Checked:** every file is checksummed on both sides and read back where possible; damage shows as an error, never as a received file.
 - **Robust on phones:** transfers resume after a dropped connection, and the screen stays on while transferring.
 - **Optional HTTPS** with your own certificate, and with it optional **end-to-end encryption**: the server only relays data it can't read.
 - **A single small C program:** the web app is built in. It needs no dependencies, or only OpenSSL if you want HTTPS.

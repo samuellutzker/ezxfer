@@ -12,7 +12,7 @@ How the code fits together, and what to know before changing it. User-facing doc
 - **The server** (`src/`) serves the page and relays WebSocket messages between the two devices of a *session*. It doesn't understand files. Its only application-level messages are `hello`, `peer`, `error`, `pong`, plus answering `ping`.
 - **The page** (`web/index.html`) implements everything else: offers, flow control, resume, the save paths and the UI. Both devices run the same code.
 - **The service worker** (`web/sw.js`) streams downloads to disk where there is no save dialog.
-- **`web/e2e.js`** holds all cryptography, for the optional end-to-end encryption. **`web/qr.js`** draws the page's QR code.
+- **`web/e2e.js`** holds all cryptography, for the optional end-to-end encryption. **`web/qr.js`** draws the page's QR code. **`web/check.js`** checksums files so damage is caught.
 
 ## Build
 
@@ -29,6 +29,7 @@ How the code fits together, and what to know before changing it. User-facing doc
 | `web/sw.js` | Service worker for streamed downloads |
 | `web/e2e.js` | End-to-end encryption: keys, key derivation, sealing and opening |
 | `web/qr.js` | QR encoder (byte mode, versions 1–40) for the page's QR code |
+| `web/check.js` | CRC32 per 1 MB chunk, file fingerprint, read-back check |
 | `tools/embed.c` | Turns a file into a C byte array at build time |
 | `tests/` | Unit, QR reference, integration and browser tests (see [Tests](#tests)) |
 | `docs/` | This guide and the README screenshots |
@@ -99,9 +100,9 @@ The server relays everything between the two devices. It only looks at the messa
   - `offer {id, name, size, mime}`
   - `accept {id, offset}`
   - `decline {id}`
-  - `cancel {id, from}` (`from` is `sender` or `receiver`)
+  - `cancel {id, from, reason?}` (`from` is `sender` or `receiver`; a receiver whose check failed says why)
   - `ack {id, bytes}`
-  - `eof {id}`
+  - `eof {id, crc}` (`crc`: the file's fingerprint, see [Integrity](#integrity))
   - `done {id}`
 - **File data:** binary messages, see below.
 - **Handshake:** `mode {e2e, check}`, sent by both devices whenever they meet. Nothing else goes to the other device until both agree; see [Encryption](#end-to-end-encryption).
@@ -113,11 +114,12 @@ sender                         receiver
 offer {id,name,size,mime}  ─▶  (Accept / Decline shown)
                            ◀─  accept {id, offset:0}        (or decline)
 binary [id|offset|data]... ─▶  written in order; ack {id,bytes} every 1 MB
-eof {id}                   ─▶  verify size, finish, done {id}
+eof {id, crc}              ─▶  check, finish, read back, done {id}
 ```
 
 - **Transfer ids** are chosen by the sender, unique per page load, and start at a random value. The receiver keys transfers as `peerId:id`.
 - **Binary messages** are a 12-byte big-endian header (`u32` id, `u64` offset) plus up to 1 MB of data. The receiver ignores any chunk whose offset isn't exactly the number of bytes it has received.
+- **Chunks** start at multiples of 1 MB, and each is 1 MB except the last; the receiver rejects anything else, since the checksums are per chunk.
 - **Resume:** when the same device (same client id) reconnects, each side replays what may have been lost: offers, cancels, declines and dones. The receiver sends `accept {offset: bytes received}`, and the sender continues from there. Leftover data from before the drop fails the offset check and is dropped.
 - **`info {instance}`** tells a reloaded peer page apart from a reconnected one. Transfers with a reloaded page fail, since its files and partial downloads are gone.
 - **`picking {active, what}`:** a file picker (`open`) or save-location prompt (`save`) is open. The other device shows "Choosing files…" or "Choosing where to save…". A connection drop meanwhile isn't reported for up to 2 minutes (`PICK_GRACE`); any other drop is reported right away.
@@ -147,6 +149,16 @@ Optional, offered only on HTTPS pages (WebCrypto needs a secure context, and wit
 
 **What it protects.** File contents, names, sizes and all other messages, against the relay and anything between it and the browsers (e.g. a TLS-terminating proxy). The page itself still comes from the server, so this does not protect against a server that serves a modified page. The server can still see timing and approximate sizes, and can drop or delay messages.
 
+## Integrity
+
+Nothing in the protocol assumes the data arrives intact; it's checked (`web/check.js`, unit-tested in `tests/test_check.mjs`):
+- The sender computes the CRC32 of every 1 MB chunk it reads, and sends the **fingerprint** (the CRC32 of all chunk CRCs, in order) with `eof`.
+- The receiver computes the CRC32 of every chunk it accepts. At `eof` it enters `checking`, compares fingerprints (damage on the way: "Damaged on the way"), finishes the file, then **reads it back** where it can (save dialog via `handle.getFile()`, browser storage, memory) and checks every chunk again (damage while writing: "The saved file is damaged"). Only then does it send `done` and show "Received".
+- Failures are sent with `cancel {reason}`, so the sender shows the same message.
+- Streamed downloads (service worker) can't be read back: there the check ends at what was handed to the download.
+
+CRC32 rather than SHA-256: it works without HTTPS (WebCrypto doesn't) and catches accidental damage reliably; deliberate tampering is what end-to-end encryption is for. It runs at about 1 GB/s.
+
 ## Page (`web/index.html`)
 
 It's one IIFE, in sections marked `// ---------- name ----------`.
@@ -162,20 +174,21 @@ It's one IIFE, in sections marked `// ---------- name ----------`.
 
 ```
 outgoing: offered ─▶ sending ─▶ finishing ─▶ done
-incoming: offered ─▶ saving ─▶ receiving ─▶ done
-          (any active state ─▶ declined | cancelled | failed, via endOut()/endIn())
+incoming: offered ─▶ saving ─▶ receiving ─▶ checking ─▶ done
+          (any active state ─▶ declined | cancelled | failed, via endOut()/endIn();
+           a transfer that has ended stays ended)
 ```
 
 - `OUT_ACTIVE` and `IN_ACTIVE` list the states in which a transfer can still change.
 - `paused` is a flag, not a state: the transfer waits for a reconnect (`pauseActive()`, `resumeWithPeer()`).
 
-**Sending.** `pump()` sends one transfer at a time. Each chunk is `new Blob([header, file.slice()])`: the browser reads the file, with no copy in JavaScript. With encryption, the slice is read, sealed and sent as header + box. The loop pauses while 16 MB are unacknowledged (`MAX_INFLIGHT`). It's woken by acks (`kickPump()`), **not by timers**, because browsers throttle timers in background tabs. `onAccepted()` first reads one byte of the file, because an unreadable Blob would make the browser kill the whole WebSocket.
+**Sending.** `pump()` sends one transfer at a time. Each chunk is read (`file.slice().arrayBuffer()`), checksummed, sealed with encryption, and sent as header + data. A file that can't be read any more (deleted, access revoked) fails the transfer there. The loop pauses while 16 MB are unacknowledged (`MAX_INFLIGHT`). It's woken by acks (`kickPump()`), **not by timers**, because browsers throttle timers in background tabs.
 
 **Receiving.** `acceptIncoming()` picks the first writer that works. All have the same `write/close/abort` interface; `close()` may return the finished file, which the page then saves with `download()`:
 
 1. `showSaveFilePicker()`: desktop Chrome/Edge, in a secure context (HTTPS or `localhost`);
 2. `streamWriter()`: the service worker, in a secure context that isn't iOS. That means Android and desktop Firefox. iOS is excluded because WebKit doesn't reliably turn such a stream into a download, and a transfer that "completes" without a file would be worse than the fallbacks. If the download doesn't start within 5 s, the page falls back to the next.
-3. `storageWriter()`: the site's private storage on disk (OPFS), in a secure context with `createWritable()` and room for the file. That means iPhone, iPad and Safari over HTTPS. Files stay there while the page is open (for Save again and Open) and are deleted on the next visit.
+3. `storageWriter()`: the site's private storage on disk (OPFS), in a secure context with `createWritable()` and room for the file. That means iPhone, iPad and Safari over HTTPS. Chunks are written as plain copies (some browsers mishandle views into larger buffers). Files stay there while their page is open (for Save again and Open): each page holds a Web Lock per file, and a page that loads deletes the files no page holds. If there isn't room, a large file goes to memory with a warning.
 4. `memoryWriter()`: everything else, i.e. plain HTTP. Every 64 MB the pieces are joined into a Blob, which Chrome can move out of the page's memory; other browsers, iOS above all, keep it all in memory and may kill the tab for files of several GB. So where nothing but memory is available (`memoryOnly`), offers over 1 GB show a warning and accepting asks first.
 
 Writes are chained on `t.chain`; acks are sent after each write.
@@ -206,6 +219,7 @@ make test   # everything; the TLS suites too when built with TLS
 | `tests/test_qr_reference.py` | python-qrcode, jsQR | `qr.js` output bit for bit, plus decodability |
 | `tests/test_crypto.mjs` | `node --test` | `e2e.js`: keys, derivation, sealing, tampering, key checks |
 | `tests/test_qr_js.mjs` | `node --test` | `qr.js`: capacities, structure, levels and masks, its SVG |
+| `tests/test_check.mjs` | `node --test` | `check.js`: CRC32 against zlib, fingerprints, read-back |
 | `tests/test_integration.py` | Python stdlib | Black-box HTTP/WebSocket against the binary; `--tls` runs it over verified TLS |
 | `tests/e2e.mjs` | Playwright | Desktop page + emulated iPhone + Android, real transfers; `--tls` too |
 

@@ -3,9 +3,10 @@
 #include "proto.h"
 #include "tls.h"
 #include "index_html.h"
-#include "sw_js.h"
+#include "check_js.h"
 #include "e2e_js.h"
 #include "qr_js.h"
+#include "sw_js.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -396,16 +397,35 @@ static size_t g_template_len;
 /* Identifies the page and service worker being served. Pages compare it with
  * the one in "hello" and reload when they are older than the server, so a
  * page left open across a server upgrade never talks an outdated protocol. */
+/* The page's scripts, served as /<name>.js (embedded from web/ at build time). */
+typedef struct {
+    const char *path;
+    const unsigned char *data;
+    size_t len;
+} script;
+#define SCRIPT(name) {"/" #name ".js", name##_js, sizeof name##_js - 1} /* minus embed's NUL */
+static const script SCRIPTS[] = {SCRIPT(sw), SCRIPT(e2e), SCRIPT(qr), SCRIPT(check)};
+
+static const script *find_script(const char *path)
+{
+    for (size_t i = 0; i < sizeof SCRIPTS / sizeof SCRIPTS[0]; i++)
+        if (strcmp(path, SCRIPTS[i].path) == 0)
+            return &SCRIPTS[i];
+    return NULL;
+}
+
 static char g_build[17];
 
 static void compute_build_id(void)
 {
     uint64_t h = 0xcbf29ce484222325ull; /* FNV-1a */
-    const uint8_t *parts[4] = {g_template ? (const uint8_t *)g_template : index_html, sw_js, e2e_js, qr_js};
-    size_t lens[4] = {g_template ? g_template_len : index_html_len, sw_js_len, e2e_js_len, qr_js_len};
-    for (int p = 0; p < 4; p++)
-        for (size_t i = 0; i < lens[p]; i++)
-            h = (h ^ parts[p][i]) * 0x100000001b3ull;
+    const uint8_t *page = g_template ? (const uint8_t *)g_template : index_html;
+    size_t page_len = g_template ? g_template_len : index_html_len;
+    for (size_t i = 0; i < page_len; i++)
+        h = (h ^ page[i]) * 0x100000001b3ull;
+    for (size_t s = 0; s < sizeof SCRIPTS / sizeof SCRIPTS[0]; s++)
+        for (size_t i = 0; i < SCRIPTS[s].len; i++)
+            h = (h ^ SCRIPTS[s].data[i]) * 0x100000001b3ull;
     snprintf(g_build, sizeof g_build, "%016llx", (unsigned long long)h);
 }
 
@@ -600,14 +620,11 @@ static void handle_http(conn *c)
         http_error(c, 405, "Method Not Allowed");
         return;
     }
+    const script *js;
     if (strcmp(req.path, "/") == 0 || strcmp(req.path, "/index.html") == 0)
         serve_index(c);
-    else if (strcmp(req.path, "/sw.js") == 0)
-        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", sw_js, sw_js_len, NULL);
-    else if (strcmp(req.path, "/e2e.js") == 0)
-        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", e2e_js, e2e_js_len, NULL);
-    else if (strcmp(req.path, "/qr.js") == 0)
-        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", qr_js, qr_js_len, NULL);
+    else if ((js = find_script(req.path)))
+        http_respond(c, 200, "OK", "text/javascript; charset=utf-8", js->data, js->len, NULL);
     else if (strcmp(req.path, "/ws") == 0 && is_get)
         ws_upgrade(c, &req);
     else if (strcmp(req.path, "/health") == 0)
