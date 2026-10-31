@@ -245,7 +245,7 @@ def http_index(srv):
     st, h, body = get(srv.port, "/")
     assert st == 200 and h["content-type"].startswith("text/html")
     assert int(h["content-length"]) == len(body)
-    assert b"<title>ezxfer</title>" in body and b"{{VERSION}}" not in body and b"v1.1.0" in body
+    assert b"<title>ezxfer</title>" in body and b"{{VERSION}}" not in body and b"v1.2.0" in body
     assert get(srv.port, "/index.html")[0] == 200
 
 
@@ -256,13 +256,11 @@ def http_head(srv):
 
 
 @test
-def http_qr_svg(srv):
-    st, h, body = get(srv.port, "/qr.svg?d=" + "http%3A%2F%2F10.0.0.2%3A8080%2F%3Fs%3DABCDEF")
-    assert st == 200 and h["content-type"] == "image/svg+xml"
-    assert body.startswith(b"<?xml") and body.rstrip().endswith(b"</svg>")
-    assert get(srv.port, "/qr.svg")[0] == 400
-    assert get(srv.port, "/qr.svg?d=")[0] == 400
-    assert get(srv.port, "/qr.svg?d=" + "x" * 1100)[0] == 400  # longer than the decode buffer
+def http_scripts(srv):
+    for path, marker in (("/sw.js", b"self.addEventListener"), ("/e2e.js", b"root.E2E"), ("/qr.js", b"root.QR"), ("/check.js", b"root.Check")):
+        st, h, body = get(srv.port, path)
+        assert st == 200 and h["content-type"].startswith("text/javascript") and marker in body, path
+    assert get(srv.port, "/qr.svg?d=x")[0] == 404  # QR codes are drawn by the page: links with a key never reach the server
 
 
 @test
@@ -653,7 +651,7 @@ def test_options():
     srv = Server("--web", f.name)
     try:
         st, _, body = get(srv.port, "/")
-        assert st == 200 and body == b"<p>custom template 1.1.0 / 1.1.0</p>", body
+        assert st == 200 and body == b"<p>custom template 1.2.0 / 1.2.0</p>", body
     finally:
         srv.stop()
         os.unlink(f.name)
@@ -675,46 +673,17 @@ def test_options():
     PASSED.append("option_validation")
     print("  ok  option_validation")
 
-    # startup banner with terminal QR code
-    def banner(*extra):
-        port = free_port()
-        p = subprocess.Popen([BIN, "-p", str(port), *cert_args(), *extra],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(0.5)
-        p.terminate()
-        out, _ = p.communicate(timeout=5)
-        assert p.returncode == 0
-        assert b"Open on other devices" in out
-        assert f"Open on this computer:  {SCHEME}://localhost:{port}/".encode() in out, out
-        return out.decode()
-
-    # default: compact, two modules per line with half-block glyphs
-    out = banner()
-    assert "█" in out
-
-    # --full-qr: modules drawn as background-coloured cells (no glyphs, so no gaps
-    # between lines in any terminal); parse it back and check the finder patterns
-    out = banner("--full-qr")
-    assert "█" not in out and "\x1b[40m" in out
-    grid = []
-    for line in out.splitlines():
-        if "\x1b[" not in line:
-            continue
-        cur, row = None, ""
-        for tok in re.findall(r"\x1b\[[0-9;]+m| ", line[2:]):
-            if tok.startswith("\x1b"):
-                cur = tok[2:-1]
-            elif cur in ("40", "107"):
-                row += "1" if cur == "40" else "0"
-        grid.append(row[::2])
-    n = len(grid) - 4  # 2-module quiet zone on each side
-    assert all(len(r) == n + 4 for r in grid) and (n - 17) % 4 == 0, (n, [len(r) for r in grid])
-    finder = ["1111111", "1000001", "1011101", "1011101", "1011101", "1000001", "1111111"]
-    for ox, oy in ((2, 2), (n - 5, 2), (2, n - 5)):
-        assert [grid[oy + i][ox:ox + 7] for i in range(7)] == finder, (ox, oy)
-
-    PASSED.append("startup_banner_qr")
-    print("  ok  startup_banner_qr")
+    # startup banner: the addresses to open
+    port = free_port()
+    p = subprocess.Popen([BIN, "-p", str(port), *cert_args()], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    time.sleep(0.5)
+    p.terminate()
+    out, _ = p.communicate(timeout=5)
+    assert p.returncode == 0
+    assert f"Open on this computer:  {SCHEME}://localhost:{port}/".encode() in out, out
+    assert re.search(rb"Open on other devices:  https?://\S+:%d/" % port, out), out
+    PASSED.append("startup_banner")
+    print("  ok  startup_banner")
 
     if TLS:
         test_tls_options()

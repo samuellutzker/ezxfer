@@ -12,10 +12,11 @@ How the code fits together, and what to know before changing it. User-facing doc
 - **The server** (`src/`) serves the page and relays WebSocket messages between the two devices of a *session*. It doesn't understand files. Its only application-level messages are `hello`, `peer`, `error`, `pong`, plus answering `ping`.
 - **The page** (`web/index.html`) implements everything else: offers, flow control, resume, the save paths and the UI. Both devices run the same code.
 - **The service worker** (`web/sw.js`) streams downloads to disk where there is no save dialog.
+- **`web/e2e.js`** holds all cryptography, for the optional end-to-end encryption. **`web/qr.js`** draws the page's QR code. **`web/check.js`** checksums files so damage is caught.
 
 ## Build
 
-`make` turns the web files into C headers with `tools/embed.c` (`build/index_html.h`, `build/sw_js.h`), then compiles everything into `ezxfer`. OpenSSL is linked when `pkg-config` finds it; `TLS=0` or `TLS=1` overrides that. `src/tls.c` compiles to stubs without `-DEZX_TLS`.
+`make` turns the web files into C headers with `tools/embed.c` (`build/index_html.h`, `build/sw_js.h`, …), then compiles everything into `ezxfer`. OpenSSL is linked when `pkg-config` finds it; `TLS=0` or `TLS=1` overrides that. `src/tls.c` compiles to stubs without `-DEZX_TLS`.
 
 | File | Role |
 |---|---|
@@ -24,9 +25,11 @@ How the code fits together, and what to know before changing it. User-facing doc
 | `src/proto.c` | Pure parsing: HTTP request head, query strings, WebSocket frames (unit-tested) |
 | `src/tls.c` | OpenSSL behind a tiny non-blocking API (`tls_read/write/handshake/pending`) |
 | `src/sha1.c` | SHA-1 + Base64 for the WebSocket handshake |
-| `src/qr.c` | QR encoder (byte mode, versions 1–40) + SVG |
 | `web/index.html` | The whole app: HTML, CSS and one IIFE script |
 | `web/sw.js` | Service worker for streamed downloads |
+| `web/e2e.js` | End-to-end encryption: keys, key derivation, sealing and opening |
+| `web/qr.js` | QR encoder (byte mode, versions 1–40) for the page's QR code |
+| `web/check.js` | CRC32 per 1 MB chunk, file fingerprint, read-back check |
 | `tools/embed.c` | Turns a file into a C byte array at build time |
 | `tests/` | Unit, QR reference, integration and browser tests (see [Tests](#tests)) |
 | `docs/` | This guide and the README screenshots |
@@ -46,8 +49,7 @@ There are no threads and no locks.
 2. With TLS only: `TS_DETECT` → `TS_HANDSHAKE` → `TS_READY`, in `tls_progress()`. Detect peeks at the first byte: `0x16` is a TLS ClientHello, anything else is plain HTTP, which gets a 301 to `https://`.
 3. `handle_http()` → route:
    - `/` serves the pre-rendered page
-   - `/qr.svg?d=` returns a QR code
-   - `/sw.js` serves the service worker
+   - `/sw.js`, `/e2e.js`, `/qr.js` serve the scripts
    - `/ws` upgrades the connection: `ws_upgrade()`
    - `/health`
 4. `handle_ws()`: parse frames, answer `ping`/`close`, reassemble fragments, and `relay()` data frames to the peer **unchanged**.
@@ -81,7 +83,7 @@ Browsers make you click through a warning for it. They also behave differently w
 - Safari may still refuse the WebSocket;
 - Chrome won't register the service worker, so Android falls back to the in-memory download.
 
-**Build id.** The server hashes (FNV-1a) the served page and service worker at startup. `{{VERSION}}` and `{{BUILD}}` are substituted once, in `render_page()`. `hello` carries the build id; a page with a different one reloads itself. That's why a page left open across an upgrade never speaks an old protocol.
+**Build id.** The server hashes (FNV-1a) the served page and scripts at startup. `{{VERSION}}` and `{{BUILD}}` are substituted once, in `render_page()`. `hello` carries the build id; a page with a different one reloads itself. That's why a page left open across an upgrade never speaks an old protocol.
 
 ## Protocol
 
@@ -98,11 +100,12 @@ The server relays everything between the two devices. It only looks at the messa
   - `offer {id, name, size, mime}`
   - `accept {id, offset}`
   - `decline {id}`
-  - `cancel {id, from}` (`from` is `sender` or `receiver`)
+  - `cancel {id, from, reason?}` (`from` is `sender` or `receiver`; a receiver whose check failed says why)
   - `ack {id, bytes}`
-  - `eof {id}`
+  - `eof {id, crc}` (`crc`: the file's fingerprint, see [Integrity](#integrity))
   - `done {id}`
 - **File data:** binary messages, see below.
+- **Handshake:** `mode {e2e, check}`, sent by both devices whenever they meet. Nothing else goes to the other device until both agree; see [Encryption](#end-to-end-encryption).
 
 The flows:
 
@@ -111,14 +114,50 @@ sender                         receiver
 offer {id,name,size,mime}  ─▶  (Accept / Decline shown)
                            ◀─  accept {id, offset:0}        (or decline)
 binary [id|offset|data]... ─▶  written in order; ack {id,bytes} every 1 MB
-eof {id}                   ─▶  verify size, finish, done {id}
+eof {id, crc}              ─▶  check, finish, read back, done {id}
 ```
 
 - **Transfer ids** are chosen by the sender, unique per page load, and start at a random value. The receiver keys transfers as `peerId:id`.
 - **Binary messages** are a 12-byte big-endian header (`u32` id, `u64` offset) plus up to 1 MB of data. The receiver ignores any chunk whose offset isn't exactly the number of bytes it has received.
+- **Chunks** start at multiples of 1 MB, and each is 1 MB except the last; the receiver rejects anything else, since the checksums are per chunk.
 - **Resume:** when the same device (same client id) reconnects, each side replays what may have been lost: offers, cancels, declines and dones. The receiver sends `accept {offset: bytes received}`, and the sender continues from there. Leftover data from before the drop fails the offset check and is dropped.
 - **`info {instance}`** tells a reloaded peer page apart from a reconnected one. Transfers with a reloaded page fail, since its files and partial downloads are gone.
 - **`picking {active, what}`:** a file picker (`open`) or save-location prompt (`save`) is open. The other device shows "Choosing files…" or "Choosing where to save…". A connection drop meanwhile isn't reported for up to 2 minutes (`PICK_GRACE`); any other drop is reported right away.
+
+## End-to-end encryption
+
+Optional, offered only on HTTPS pages (WebCrypto needs a secure context, and without TLS the page itself could be tampered with). It's off by default; the host turns it on per session.
+
+**Key.** 20 characters from a 32-symbol alphabet (100 bits), shown as `XXXXX-XXXXX-XXXXX-XXXXX`. The host's page makes it; it travels in the join link after `#k=` (browsers never send the fragment to a server), so the QR code is drawn by the page (`qr.js`), not the server. A device joining by typed code is asked to type it. Keys are kept in `sessionStorage` per session code, so reloads keep them.
+
+**Crypto** (`e2e.js`, unit-tested in `tests/test_crypto.mjs`, `make test-js`):
+- `E2E.channel(key, session, me, peer)` derives one AES-256-GCM key per direction with HKDF-SHA256 (salt `ezxfer e2e v1|<session>`, info `<from id>><to id>`). Non-extractable, kept in a closure. Separate directions mean a relay can't bounce a device's own boxes back to it.
+- A box is `iv (12) | ciphertext | tag (16)`, with a random IV each time. The additional data is `msg` for messages and the 12-byte header for file chunks, which ties each chunk to its transfer and offset.
+- The key check is the sealed message `{"type":"key-check"}`.
+- `seal()` returns an `E2E.Sealed`, a type nothing else can create.
+
+**Handshake.** When the peer appears, each side sends `mode {e2e, check}`: whether it encrypts, plus a key check if it does. Then:
+- neither encrypts → plaintext session;
+- the peer encrypts and we have no key → the key dialog, which verifies the typed key against the peer's check before using it;
+- both encrypt and the peer's check opens with our key → encrypted session;
+- otherwise the encrypting side waits ("Waiting for the other device to enter the key"). It never falls back to plaintext.
+
+**On the wire** (all in `index.html`, section *talking to the network*):
+- `toServer()` sends only `ping` and `mode`.
+- `wire()` sends everything for the other device. In an encrypted session it throws on anything that isn't an `E2E.Sealed`. Messages go as `{"type":"sealed","box":<base64>}`, chunks as header + box.
+- `receive()` handles every incoming frame in order. Server messages and `mode` are plaintext; everything else is dropped until the handshake is done, and in an encrypted session unless it opens with the peer's key.
+
+**What it protects.** File contents, names, sizes and all other messages, against the relay and anything between it and the browsers (e.g. a TLS-terminating proxy). The page itself still comes from the server, so this does not protect against a server that serves a modified page. The server can still see timing and approximate sizes, and can drop or delay messages.
+
+## Integrity
+
+Nothing in the protocol assumes the data arrives intact; it's checked (`web/check.js`, unit-tested in `tests/test_check.mjs`):
+- The sender computes the CRC32 of every 1 MB chunk it reads, and sends the **fingerprint** (the CRC32 of all chunk CRCs, in order) with `eof`.
+- The receiver computes the CRC32 of every chunk it accepts. At `eof` it enters `checking`, compares fingerprints (damage on the way: "Damaged on the way"), finishes the file, then **reads it back** where it can (save dialog via `handle.getFile()`, browser storage, memory) and checks every chunk again (damage while writing: "The saved file is damaged"). Only then does it send `done` and show "Received".
+- Failures are sent with `cancel {reason}`, so the sender shows the same message.
+- Streamed downloads (service worker) can't be read back: there the check ends at what was handed to the download.
+
+CRC32 rather than SHA-256: it works without HTTPS (WebCrypto doesn't) and catches accidental damage reliably; deliberate tampering is what end-to-end encryption is for. It runs at about 1 GB/s.
 
 ## Page (`web/index.html`)
 
@@ -129,41 +168,44 @@ It's one IIFE, in sections marked `// ---------- name ----------`.
 - `wakeUp()`: on returning to the page (visibility, focus, `pageshow`), reconnect or run `checkAlive()`. That's a `ping` the server answers; a socket without an answer within 3 s is replaced. There's also a check after 15 s of silence.
 - The client id lives in `sessionStorage`, so a tab the phone reloads gets its session slot back. Transfer ids start at a random value, so a reloaded page can't collide with ids the peer remembers.
 - Files picked while disconnected are offered once the peer is back.
-- `onMessage()` dispatches every JSON message.
+- `receive()` takes every incoming frame in order (see [Encryption](#end-to-end-encryption)) and dispatches to `onServerMessage()`, `onMode()`, `onPeerMessage()` or `onChunk()`. Peer messages are sent with `toPeer()`.
 
 **Transfers** are plain objects in `outgoing` (by id) and `incoming` (by `peerId:id`). Their states:
 
 ```
 outgoing: offered ─▶ sending ─▶ finishing ─▶ done
-incoming: offered ─▶ saving ─▶ receiving ─▶ done
-          (any active state ─▶ declined | cancelled | failed, via endOut()/endIn())
+incoming: offered ─▶ saving ─▶ receiving ─▶ checking ─▶ done
+          (any active state ─▶ declined | cancelled | failed, via endOut()/endIn();
+           a transfer that has ended stays ended)
 ```
 
 - `OUT_ACTIVE` and `IN_ACTIVE` list the states in which a transfer can still change.
 - `paused` is a flag, not a state: the transfer waits for a reconnect (`pauseActive()`, `resumeWithPeer()`).
 
-**Sending.** `pump()` sends one transfer at a time. Each chunk is `ws.send(new Blob([header, file.slice()]))`: the browser reads the file, with no copy in JavaScript. The loop pauses while 16 MB are unacknowledged (`MAX_INFLIGHT`). It's woken by acks (`kickPump()`), **not by timers**, because browsers throttle timers in background tabs. `onAccepted()` first reads one byte of the file, because an unreadable Blob would make the browser kill the whole WebSocket.
+**Sending.** `pump()` sends one transfer at a time. Each chunk is read (`file.slice().arrayBuffer()`), checksummed, sealed with encryption, and sent as header + data. A file that can't be read any more (deleted, access revoked) fails the transfer there. The loop pauses while 16 MB are unacknowledged (`MAX_INFLIGHT`). It's woken by acks (`kickPump()`), **not by timers**, because browsers throttle timers in background tabs.
 
-**Receiving.** `acceptIncoming()` picks a writer. All three have the same `write/close/abort` interface:
+**Receiving.** `acceptIncoming()` picks the first writer that works. All have the same `write/close/abort` interface; `close()` may return the finished file, which the page then saves with `download()`:
 
 1. `showSaveFilePicker()`: desktop Chrome/Edge, in a secure context (HTTPS or `localhost`);
-2. `streamWriter()`: the service worker, in a secure context that isn't iOS. That means Android and desktop Firefox. iOS is excluded because WebKit doesn't reliably turn such a stream into a download, and a transfer that "completes" without a file would be worse than holding it in memory. If the download doesn't start within 5 s, the page falls back to 3.
-3. none: chunks collected in memory, then saved with `download()`. Very large files can exceed what a phone browser allows.
+2. `streamWriter()`: the service worker, in a secure context that isn't iOS. That means Android and desktop Firefox. iOS is excluded because WebKit doesn't reliably turn such a stream into a download, and a transfer that "completes" without a file would be worse than the fallbacks. If the download doesn't start within 5 s, the page falls back to the next.
+3. `storageWriter()`: the site's private storage on disk (OPFS), in a secure context with `createWritable()` and room for the file. That means iPhone, iPad and Safari over HTTPS. Chunks are written as plain copies (some browsers mishandle views into larger buffers). Files stay there while their page is open (for Save again and Open): each page holds a Web Lock per file, and a page that loads deletes the files no page holds. If there isn't room, a large file goes to memory with a warning.
+4. `memoryWriter()`: everything else, i.e. plain HTTP. Every 64 MB the pieces are joined into a Blob, which Chrome can move out of the page's memory; other browsers, iOS above all, keep it all in memory and may kill the tab for files of several GB. So where nothing but memory is available (`memoryOnly`), offers over 1 GB show a warning and accepting asks first.
 
 Writes are chained on `t.chain`; acks are sent after each write.
 
-**Service worker** (`web/sw.js`). The page registers a download (name, size, type) and passes a `MessagePort`, then opens `/dl/<random>/<name>` in a hidden iframe. The worker answers that request with a streaming `Response` fed through the port. Each chunk is acknowledged only when the download has room, which is how backpressure reaches the sender. The page pings the worker every 10 s while a download is open, to keep it alive. The worker must stay a separate, root-level file: browsers don't register inline service workers, and its scope must cover `/dl/`.
+**Service worker** (`web/sw.js`). The page registers a download (name, size, type) and passes a `MessagePort`, then opens `/dl/<random>` in a hidden iframe (no file name in the URL, in case the request reaches the server). The worker answers that request with a streaming `Response` fed through the port. Each chunk is acknowledged only when the download has room, which is how backpressure reaches the sender. The page pings the worker every 10 s while a download is open, to keep it alive. The worker must stay a separate, root-level file: browsers don't register inline service workers, and its scope must cover `/dl/`.
 
 **Rendering.** `render(t)` marks a row dirty; `draw(t)` redraws it at most once per animation frame.
 
 **Other parts:**
 - `updateWakeLock()` keeps the screen on while transfers are busy.
+- `openFile()`: the "Open" button on received files, for files saved through the dialog (read back with `handle.getFile()`), kept in storage or held in memory. Only for types the browser shows without running anything from the file (`VIEWABLE`): an opened `blob:` URL has this page's origin, so HTML or SVG could run scripts on it. Streamed downloads can't be opened; the page doesn't learn where they were saved.
 - `setPicking()` / `setPeerPicking()` implement the "Choosing files…" and "Choosing where to save…" status:
   - **Start:** the file input's `click`, the desktop save dialog, or the start of a download. On Android, Chrome may ask for a save location there, depending on its settings.
   - **End:** `change` or `cancel`, or focus returning after the picker took it away.
   - **Download prompts:** the page can't know whether one will appear, so `maybeChoosingSaveLocation()` withdraws the announcement after 3 s unless the page was left.
 - `updateWakeLock()`: the Wake Lock API needs a secure context. Elsewhere, touch devices get a "keep this screen on" hint instead.
-- `window.ezxfer` exposes state and fault injection (`dropConnection`, `freezeConnection`) **for the tests only**.
+- `window.ezxfer` exposes state (including `encrypted` and `rejected`) and fault injection (`dropConnection`, `freezeConnection`) **for the tests only**.
 
 ## Tests
 
@@ -173,8 +215,11 @@ make test   # everything; the TLS suites too when built with TLS
 
 | Suite | Tool | What it covers |
 |---|---|---|
-| `tests/test_unit.c` | C, ASan/UBSan | `proto.c`, `sha1.c`, `qr.c` |
-| `tests/test_qr_reference.py` | python-qrcode, jsQR | QR output bit for bit, plus decodability |
+| `tests/test_unit.c` | C, ASan/UBSan | `proto.c`, `sha1.c` |
+| `tests/test_qr_reference.py` | python-qrcode, jsQR | `qr.js` output bit for bit, plus decodability |
+| `tests/test_crypto.mjs` | `node --test` | `e2e.js`: keys, derivation, sealing, tampering, key checks |
+| `tests/test_qr_js.mjs` | `node --test` | `qr.js`: capacities, structure, levels and masks, its SVG |
+| `tests/test_check.mjs` | `node --test` | `check.js`: CRC32 against zlib, fingerprints, read-back |
 | `tests/test_integration.py` | Python stdlib | Black-box HTTP/WebSocket against the binary; `--tls` runs it over verified TLS |
 | `tests/e2e.mjs` | Playwright | Desktop page + emulated iPhone + Android, real transfers; `--tls` too |
 
@@ -184,7 +229,7 @@ What the suites cover, beyond the basics:
 - **Unit:**
   - SHA-1/Base64 vectors, the RFC 6455 examples and all frame-length encodings;
   - unmasking checked against the byte-wise definition at every length and alignment;
-  - HTTP and query parsing, the QR capacity table and structure.
+  - HTTP and query parsing.
 - **QR:** about 190 symbols across versions 1–40, all ECC levels and masks, matched module for module against python-qrcode and decoded by jsQR.
 - **Integration** (plain and `--tls`):
   - routes and errors;
@@ -202,6 +247,7 @@ What the suites cover, beyond the basics:
   - dead-connection detection, phone reloads, unreadable files;
   - wake lock, background-tab throttling;
   - session full or stale, server upgrade and restart, layout.
+  - **TLS only, encryption:** every frame each page sends and receives is recorded and searched for file contents, names and the key (a plaintext session is the control); joining by QR and by typed code with a wrong and right key; injected, forged and reflected messages dropped; resume and reload.
 
 Useful patterns already used in the suites:
 
@@ -219,11 +265,11 @@ Servers started by the tests run with `--quiet`. To debug the server, run it you
 
 ## Changing things
 
-- **New message type:** handle it in `onMessage()`, and add it to the [protocol list](#protocol). The server needs no change unless the server itself must answer.
+- **New message type:** handle it in `onPeerMessage()` and send it with `toPeer()` (encrypted automatically), and add it to the [protocol list](#protocol). The server needs no change unless the server itself must answer.
 - **Binary format or other protocol changes:** both devices always run the same page, thanks to the build id. Old pages reload themselves, so there's no compatibility code to write.
 - **Anything a reconnect might lose:** decide what `resumeWithPeer()` must replay, and make the receiving side idempotent: duplicate offers, cancels and dones must be ignored.
 - **Server changes:** keep `proto.c` free of I/O and unit-test it there. Run the integration suite against an ASan build too:
   ```sh
   cc -fsanitize=address,undefined -DEZX_TLS -Ibuild src/*.c -lssl -lcrypto
   ```
-- **Version:** bump `EZX_VERSION` in `src/server.c`. The build id changes on its own whenever the page or service worker changes.
+- **Version:** bump `EZX_VERSION` in `src/server.c`. The build id changes on its own whenever the page or a script changes.

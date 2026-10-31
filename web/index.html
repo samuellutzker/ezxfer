@@ -84,7 +84,20 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 @keyframes spin { to { transform: rotate(360deg); } }
 .code-row { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 6px; gap: 10px; }
 .code { font: 600 26px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .18em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.link { font-size: 12.5px; color: var(--muted); word-break: break-all; }
+.e2e { margin-top: 14px; padding: 12px 14px; border-radius: 14px; background: var(--faint); font-size: 13.5px; }
+.e2e label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; }
+.e2e input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.e2e .key { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.e2e .key b { display: block; margin-top: 3px; color: var(--text); font: 600 16px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .06em; user-select: all; }
+.connected-info .who .lock { display: block; color: var(--ok); }
+dialog { width: min(92vw, 400px); padding: 22px; border-radius: var(--radius); border: 1px solid var(--card-border); background: var(--bg2); color: var(--text); box-shadow: var(--shadow); }
+dialog::backdrop { background: rgba(0,0,0,.55); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+dialog h2 { margin: 0 0 4px; font-size: 17px; }
+dialog p { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; }
+dialog input { width: 100%; padding: 12px 14px; border-radius: 12px; background: var(--faint); border: 1px solid var(--card-border); outline: none; text-transform: uppercase; letter-spacing: .08em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+dialog input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,92,255,.25); }
+dialog .err { min-height: 1.5em; margin: 6px 0 10px; color: var(--err); font-size: 13px; }
+dialog .row { display: flex; justify-content: flex-end; gap: 8px; }
 .divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 20px 0 14px; text-transform: uppercase; letter-spacing: .08em; }
 .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--card-border); }
 form.join { display: flex; gap: 8px; }
@@ -141,7 +154,7 @@ body:not(.connected) .locked { display: block; }
 .status .st-warn { color: var(--warn); }
 .bar { height: 5px; border-radius: 99px; background: rgba(127,127,127,.18); overflow: hidden; margin-top: 7px; display: none; }
 .bar i { display: block; height: 100%; width: 0; background: var(--grad); border-radius: 99px; transition: width .2s; }
-.item.sending .bar, .item.receiving .bar, .item.finishing .bar { display: block; }
+.item.sending .bar, .item.receiving .bar, .item.finishing .bar, .item.checking .bar { display: block; }
 .item.paused .bar i { background: var(--warn); }
 .actions { display: flex; gap: 6px; }
 @media (max-width: 480px) {
@@ -175,7 +188,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     <section class="card" id="connectCard">
       <div class="waiting-only">
         <h2>Connect a device</h2>
-        <p class="sub">Scan this code with your phone's camera, or open the link on another computer.</p>
+        <p class="sub">Scan this code with your phone's camera, or enter the session code on the other device.</p>
         <div class="qr-box"><div class="spinner" id="qrSpin"></div><img id="qr" alt="QR code to join this session"></div>
         <div class="code-row">
           <div>
@@ -186,7 +199,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
           </button>
         </div>
-        <div class="link" id="link"></div>
+        <div class="e2e" id="e2eBox" hidden>
+          <label><input type="checkbox" id="e2eToggle"> End-to-end encryption</label>
+          <div class="key" id="keyBox" hidden>Key for joining by code<b id="keyText"></b></div>
+        </div>
         <div class="divider">or join a session</div>
         <form class="join" id="joinForm" autocomplete="off">
           <label class="sr" for="joinCode">Session code</label>
@@ -196,7 +212,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       </div>
       <div class="connected-info">
         <div class="avatar"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/></svg></div>
-        <div class="who"><b id="peerName">Device</b><span>Connected · session <span id="code2"></span></span></div>
+        <div class="who"><b id="peerName">Device</b><span>Connected · session <span id="code2"></span><span class="lock" id="lock" hidden>🔒 End-to-end encrypted</span></span></div>
         <button class="btn ghost small danger" id="leaveBtn">Disconnect</button>
       </div>
     </section>
@@ -222,11 +238,25 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   <footer>Files go straight from one browser to the other through this server and are never stored.</footer>
 </div>
 <div class="toasts" id="toasts"></div>
+<dialog id="keyDialog">
+  <form id="keyForm" autocomplete="off">
+    <h2>Enter the key</h2>
+    <p>This session is end-to-end encrypted. Enter the key shown on the other device.</p>
+    <label class="sr" for="keyInput">Key</label>
+    <input id="keyInput" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" maxlength="23" autocapitalize="characters" autocorrect="off" spellcheck="false">
+    <div class="err" id="keyErr"></div>
+    <div class="row"><button type="button" class="btn ghost" id="keyLeave">Leave</button><button class="btn primary">Connect</button></div>
+  </form>
+</dialog>
+
+<script src="/e2e.js"></script>
+<script src="/qr.js"></script>
+<script src="/check.js"></script>
 
 <script>
 'use strict';
 (function () {
-  const CHUNK = 1024 * 1024;             // bytes per binary message
+  const CHUNK = Check.CHUNK;             // bytes per binary message (1 MB; checksums are per chunk)
   const MAX_INFLIGHT = 16 * 1024 * 1024; // sent but not yet acknowledged by the receiver
   const ACK_EVERY = 1024 * 1024;
   const HDR = 12;                        // binary header: u32 transfer id, u64 byte offset
@@ -241,8 +271,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const pumpWait = () => new Promise((r) => { pumpWaiter = r; });
   function kickPump() { const w = pumpWaiter; pumpWaiter = null; if (w) w(); }
 
-  let ws = null, session = null, peerConnected = false, joinUrl = '';
+  let ws = null, session = null, joinUrl = '';
+  let peerConnected = false;  // the other device is here and the handshake is done: we talk to it
   let intentionalClose = false, reconnectDelay = 800;
+  let requested = null;       // the session code this connection asked to join (null: a new session)
+  // End-to-end encryption (all crypto is in e2e.js). The session's key, if it
+  // uses one, and the channel to the other device once both have shown that
+  // they hold that key. Until then, nothing but the handshake goes to it.
+  let keyText = null, keyOwn = false, wantE2E = false, chan = null;
+  let peerMode = null;   // the other device's handshake message
+  let greeting = null;   // what to do once the handshake completes
+  let rejected = 0;      // dropped incoming messages that weren't sealed with the key (exposed for tests)
   const randomHex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => b.toString(16).padStart(2, '0')).join('');
   // Transfer ids start at a random point so a reloaded page never reuses ids
   // the other device still remembers from before the reload.
@@ -271,7 +310,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   const sendQueue = [];
   let pumping = false;
   const OUT_ACTIVE = ['offered', 'sending', 'finishing'];  // states in which a transfer can still change
-  const IN_ACTIVE = ['offered', 'saving', 'receiving'];
+  const IN_ACTIVE = ['offered', 'saving', 'receiving', 'checking'];
 
   // ---------- utils ----------
   function fmtSize(n) {
@@ -305,7 +344,64 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3800);
   }
   function setPill(cls, text) { $('pill').className = 'pill ' + cls; $('pillText').textContent = text; }
-  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  // ---------- talking to the network ----------
+  // Only toServer() and wire() write to the socket.
+  // toServer(): the server's ping and the encryption handshake, neither of
+  // which says anything about files.
+  function toServer(obj) {
+    if (obj.type !== 'ping' && obj.type !== 'mode') throw new Error('not a server message: ' + obj.type);
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+  }
+  // wire(): everything for the other device. In an encrypted session it takes
+  // nothing but E2E.Sealed boxes, which only e2e.js can make: plaintext can't
+  // reach the network, whatever the rest of the page does.
+  function wire(payload, chunkHeader) {
+    if (!ws || ws.readyState !== 1) return;
+    if (keyText) {
+      if (!(payload instanceof E2E.Sealed)) throw new Error('E2E: refusing to send unencrypted data');
+      payload = chunkHeader ? payload.bytes : { type: 'sealed', box: E2E.toB64(payload.bytes) };
+    }
+    ws.send(chunkHeader ? new Blob([chunkHeader, payload]) : JSON.stringify(payload));
+  }
+  // A message for the other device, sent once the handshake is done. With
+  // encryption, sealing is asynchronous; the queue keeps messages in order.
+  let txQueue = Promise.resolve();
+  function toPeer(obj) {
+    if (!peerConnected) return;
+    if (!keyText) { wire(obj); return; }
+    const c = chan;
+    txQueue = txQueue.then(() => c.sealMessage(obj)).then((box) => { if (c === chan) wire(box); }).catch(console.error);
+  }
+
+  // Everything that arrives is handled in order, one at a time (opening sealed
+  // boxes is asynchronous). The server's messages and the handshake are
+  // plaintext; the rest comes from the other device and is only used after the
+  // handshake, and in an encrypted session only if it opens with the key.
+  let rxQueue = Promise.resolve();
+  const FROM_SERVER = ['hello', 'peer', 'error', 'pong'];
+  async function receive(data) {
+    let msg = null, header = null, body = null;
+    if (typeof data === 'string') {
+      try { msg = JSON.parse(data); } catch (_) { return; }
+      if (FROM_SERVER.includes(msg.type)) return onServerMessage(msg);
+      if (msg.type === 'mode') return onMode(msg);
+    } else {
+      if (data.byteLength < HDR) return;
+      header = new Uint8Array(data, 0, HDR); body = new Uint8Array(data, HDR);
+    }
+    if (!peerConnected) return;
+    if (keyText) {
+      const c = chan;
+      try {
+        if (header) body = await c.openChunk(header, body);
+        else if (msg.type === 'sealed') msg = await c.openMessage(E2E.fromB64(msg.box));
+        else throw new Error('not sealed');
+      } catch (_) { rejected++; return; }
+      if (c !== chan) return;
+    }
+    if (header) onChunk(header, body); else onPeerMessage(msg);
+  }
 
   // ---------- connection ----------
   function connect(code) {
@@ -314,15 +410,13 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const sock = new WebSocket(proto + '//' + location.host + '/ws?c=' + clientId + (code ? '&s=' + encodeURIComponent(code) : ''));
     sock.binaryType = 'arraybuffer';
     ws = sock;
+    requested = code;
     connections++;
     setPill('wait', code ? 'Joining…' : 'Connecting…');
     sock.onmessage = (e) => {
       if (sock !== ws) return;
       lastRx = performance.now();
-      if (typeof e.data === 'string') {
-        let msg; try { msg = JSON.parse(e.data); } catch (_) { return; }
-        onMessage(msg);
-      } else onBinary(e.data);
+      rxQueue = rxQueue.then(() => sock === ws && receive(e.data)).catch(console.error);
     };
     sock.onopen = () => { reconnectDelay = 800; };
     sock.onclose = (e) => socketLost(sock, e.code);
@@ -341,6 +435,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       return;
     }
     if (intentionalClose) { failActive('Disconnected'); return; }
+    droppedPicking = ownPickerOpen() ? performance.now() : 0;
     pauseActive();
     setPill('off', 'Reconnecting…');
     setTimeout(() => { if (ws === sock) connect(session); }, reconnectDelay);
@@ -359,7 +454,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (!sock || sock.readyState !== 1 || (aliveCheck && !fresh)) return;
     clearTimeout(aliveCheck);
     const asked = performance.now();
-    send({ type: 'ping' });  // answered by the server itself
+    toServer({ type: 'ping' });  // answered by the server itself
     aliveCheck = setTimeout(() => {
       aliveCheck = null;
       if (ws !== sock || lastRx >= asked) return;  // something arrived: alive
@@ -387,7 +482,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     connect(newCode || null);
   }
 
-  function onMessage(m) {
+  function onServerMessage(m) {
     switch (m.type) {
       case 'hello':
         if (m.build && m.build !== BUILD && !BUILD.startsWith('{{')) {
@@ -404,11 +499,15 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           }
           toast('This page is out of date — please reload it', true);  // reloading didn't help (e.g. a cache)
         }
-        session = m.session; joinUrl = m.url;
+        if (m.session !== session) {
+          session = m.session;
+          const kept = loadKey(session);
+          if (kept) { setKey(kept.key, kept.own); if (kept.own) wantE2E = true; }  // e.g. after a reload
+          else setKey(wantE2E && !requested ? E2E.newKey() : null, true);  // a new session of our own
+        }
+        joinUrl = m.url;
         $('code').textContent = session; $('code2').textContent = session;
-        $('link').textContent = joinUrl;
-        $('qr').onload = () => { $('qrSpin').hidden = true; };
-        $('qr').src = '/qr.svg?d=' + encodeURIComponent(joinUrl);
+        showJoinLink();
         history.replaceState(null, '', '?s=' + session);
         if (!peerConnected) setPill('wait', 'Waiting for device');
         break;
@@ -419,10 +518,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           const wasPicking = same && peerPicking;  // back from its file picker: nothing to report
           setPeerPicking(false);
           if (!same) { failActive('The other device left'); peerId = id; peerInstance = ''; }
-          setPeer(true);
-          send({ type: 'info', name: deviceName(), instance: instanceId });
-          if (same) { resumeWithPeer(); if (!wasPicking) toast('Device reconnected'); } else toast('Device connected');
+          resetHandshake();
+          peerConnected = false;  // nothing goes to the device until the handshake is done
+          greeting = { same, wasPicking };
+          return startHandshake();
         } else {
+          resetHandshake();
           pauseActive();
           if (peerPicking) {
             // Phones usually lose the connection while their file picker is open.
@@ -439,7 +540,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           }
         }
         break;
-      case 'picking': setPeerPicking(!!m.active, m.what); break;
       case 'error':
         // Unknown, expired or full session: start a fresh one instead
         intentionalClose = true;
@@ -450,6 +550,13 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         history.replaceState(null, '', location.pathname);
         setTimeout(() => connect(null), 100);
         break;
+      case 'pong': break;
+    }
+  }
+
+  function onPeerMessage(m) {
+    switch (m.type) {
+      case 'picking': setPeerPicking(!!m.active, m.what); break;
       case 'info':
         $('peerName').textContent = String(m.name || 'Device').slice(0, 40);
         if (m.instance) {
@@ -457,15 +564,96 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           peerInstance = String(m.instance);
         }
         break;
-      case 'pong': break;
       case 'offer': addIncoming(m); break;
       case 'accept': onAccepted(m); break;
       case 'decline': { const t = outgoing.get(m.id); if (t && t.state === 'offered') endOut(t, 'declined'); break; }
       case 'cancel': onCancel(m); break;
       case 'ack': { const t = outgoing.get(m.id); if (t && (t.state === 'sending' || t.state === 'finishing')) { t.acked = Math.min(t.size, Math.max(t.acked, +m.bytes || 0)); render(t); kickPump(); } break; }
-      case 'eof': onEof(m.id); break;
+      case 'eof': onEof(m); break;
       case 'done': { const t = outgoing.get(m.id); if (t && OUT_ACTIVE.includes(t.state)) { t.acked = t.size; endOut(t, 'done'); } break; }
     }
+  }
+
+  // ---------- encryption handshake ----------
+  // When the other device connects, each side says whether it encrypts and, if
+  // so, adds a key check: a box only a device with the same key can open. A
+  // device without the key is asked for it; until both agree, nothing else is
+  // exchanged. An encrypting device never falls back to plaintext.
+  async function startHandshake() {
+    if (keyText && !E2E.available) { setPill('off', 'Encrypted session: needs HTTPS'); return; }
+    chan = keyText ? await E2E.channel(keyText, session, clientId, peerId) : null;
+    toServer({ type: 'mode', e2e: !!chan, check: chan ? await chan.makeCheck() : '' });
+    if (peerMode) await onMode(peerMode);
+  }
+
+  async function onMode(m) {
+    peerMode = m;
+    if (peerConnected || !peerId || (keyText && !chan)) return;  // done, or our own half isn't ready
+    if (m.e2e && !keyText) return askForKey('');
+    if (!m.e2e && !keyText) return peerReady();
+    if (m.e2e && await chan.verifyCheck(m.check)) return peerReady();
+    // We encrypt but the other device can't open our boxes yet.
+    if (keyOwn || !m.e2e) setPill('wait', 'Waiting for the other device to enter the key');
+    else askForKey(KEY_MISMATCH);
+  }
+
+  function peerReady() {
+    $('keyDialog').close();
+    setPeer(true);
+    toPeer({ type: 'info', name: deviceName(), instance: instanceId });
+    const g = greeting || {}; greeting = null;
+    if (g.same) { resumeWithPeer(); if (!g.wasPicking && !pickerDropQuiet()) toast('Device reconnected'); } else toast('Device connected');
+    droppedPicking = 0;
+  }
+
+  const KEY_MISMATCH = 'This key doesn’t match the other device’s';
+  function resetHandshake() { chan = null; peerMode = null; greeting = null; $('keyDialog').close(); }
+
+  function askForKey(error) {
+    if (!E2E.available) { setPill('off', 'Encrypted session: needs HTTPS'); return; }
+    setPill('wait', 'Enter the key');
+    $('keyErr').textContent = error;
+    if (!$('keyDialog').open) { $('keyInput').value = ''; $('keyInput').dataset.chars = ''; $('keyDialog').showModal(); }
+  }
+
+  async function submitKey(e) {
+    e.preventDefault();
+    const key = E2E.normalizeKey($('keyInput').value);
+    if (!key) { $('keyErr').textContent = 'A key has 20 letters and digits'; return; }
+    if (!peerMode || !peerMode.e2e) { $('keyErr').textContent = 'The other device isn’t connected'; return; }
+    const c = await E2E.channel(key, session, clientId, peerId);
+    if (!(await c.verifyCheck(peerMode.check))) { $('keyErr').textContent = KEY_MISMATCH; return; }
+    $('keyDialog').close();
+    setKey(key, false);
+    rxQueue = rxQueue.then(startHandshake);  // tell the other device; we're ready once ours checks out too
+  }
+
+  // The session's key, kept per session code so a reloaded page still has it.
+  // `own`: made here, so this device shows it rather than asks for it.
+  function loadKey(code) {
+    try { const k = JSON.parse(sessionStorage.getItem('ezxfer-key:' + code)); if (E2E.normalizeKey(k.key)) return k; } catch (_) {}
+    return linkKey && code === initial ? { key: linkKey, own: false } : null;  // storage blocked
+  }
+  function setKey(key, own) {
+    keyText = key; keyOwn = own;
+    try {
+      if (key) sessionStorage.setItem('ezxfer-key:' + session, JSON.stringify({ key, own }));
+      else sessionStorage.removeItem('ezxfer-key:' + session);
+    } catch (_) {}
+    $('e2eToggle').checked = !!key;
+    $('keyBox').hidden = !key;
+    $('keyText').textContent = key ? E2E.formatKey(key) : '';
+    showJoinLink();
+  }
+
+  // The join link (in the QR code and copied by the copy button), drawn here:
+  // with encryption it carries the key after "#", which browsers never send to a server.
+  let joinLink = '';
+  function showJoinLink() {
+    if (!joinUrl) return;
+    joinLink = joinUrl + (keyText ? '#k=' + E2E.normalizeKey(keyText) : '');
+    $('qr').src = 'data:image/svg+xml,' + encodeURIComponent(QR.svg(joinLink));
+    $('qrSpin').hidden = true;
   }
 
   // The other device has its file picker open (it says so when the picker opens
@@ -483,7 +671,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   function setPeer(on) {
     peerConnected = on;
+    if (!on) resetHandshake();
     document.body.classList.toggle('connected', on);
+    $('lock').hidden = !(on && chan);
     if (on) setPill('on', peerPicking ? peerPickLabel : 'Connected');
     else if (ws && ws.readyState === 1 && session) setPill('wait', 'Waiting for device');
     if (!on) $('peerName').textContent = 'Device';
@@ -491,8 +681,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   // Final states: done, declined, cancelled, failed (with t.error).
-  function endOut(t, state, error) { t.state = state; t.paused = false; t.error = error; render(t); kickPump(); }
-  function endIn(t, state, error) { abortWriter(t); t.state = state; t.paused = false; t.error = error; render(t); }
+  // (a transfer that has ended stays as it ended)
+  function endOut(t, state, error) { if (!OUT_ACTIVE.includes(t.state)) return; t.state = state; t.paused = false; t.error = error; render(t); kickPump(); }
+  function endIn(t, state, error) { if (!IN_ACTIVE.includes(t.state)) return; abortWriter(t); t.state = state; t.paused = false; t.error = error; render(t); }
 
   function failActive(reason) {
     for (const t of outgoing.values()) if (OUT_ACTIVE.includes(t.state)) endOut(t, 'failed', reason);
@@ -523,7 +714,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function resumeWithPeer() {
     for (const t of outgoing.values()) {
       if (t.state === 'offered') sendOffer(t);
-      else if (t.state === 'cancelled') send({ type: 'cancel', id: t.id, from: 'sender' });
+      else if (t.state === 'cancelled') toPeer({ type: 'cancel', id: t.id, from: 'sender' });
     }
     for (const t of incoming.values()) {
       if (t.peer !== peerId) continue;
@@ -531,11 +722,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         t.paused = false; t.lastAck = t.received;
         t.started = performance.now(); t.base = t.received;
         if (t.received > 0) resumes++;
-        send({ type: 'accept', id: t.id, offset: t.received });
+        toPeer({ type: 'accept', id: t.id, offset: t.received });
         render(t);
-      } else if (t.state === 'declined') send({ type: 'decline', id: t.id });
-      else if (t.state === 'cancelled' || t.state === 'failed') send({ type: 'cancel', id: t.id, from: 'receiver' });
-      else if (t.state === 'done') send({ type: 'done', id: t.id });
+      } else if (t.state === 'declined') toPeer({ type: 'decline', id: t.id });
+      else if (t.state === 'cancelled' || t.state === 'failed') toPeer({ type: 'cancel', id: t.id, from: 'receiver', reason: t.error });
+      else if (t.state === 'done') toPeer({ type: 'done', id: t.id });
     }
   }
 
@@ -545,33 +736,27 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (!peerConnected && !peerId) { toast('Connect a device first', true); return; }
     // Picked while the connection is briefly down (phones often drop it while
     // the file picker is open): offered as soon as the other device is back.
-    if (!peerConnected) toast('Reconnecting — the files will be offered when the other device is back');
+    if (!peerConnected && !pickerDropQuiet()) toast('Reconnecting — the files will be offered when the other device is back');
     for (const file of files) {
-      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, state: 'offered', started: 0, base: 0, paused: false };
+      const t = { id: nextId++, file, name: file.name, size: file.size, sent: 0, acked: 0, crcs: [], state: 'offered', started: 0, base: 0, paused: false };
       outgoing.set(t.id, t);
       createRow(t, false);
       render(t);
       sendOffer(t);
     }
   }
-  const sendOffer = (t) => send({ type: 'offer', id: t.id, name: t.name, size: t.size, mime: t.file.type || '' });
+  const sendOffer = (t) => toPeer({ type: 'offer', id: t.id, name: t.name, size: t.size, mime: t.file.type || '' });
 
   // "accept" starts a transfer, or continues it from `offset` after a reconnect.
   async function onAccepted(m) {
     const t = outgoing.get(m.id);
     if (!t || t.state === 'cancelled' || t.state === 'failed') {
       // unknown here (e.g. we reloaded) or over: don't leave the receiver waiting
-      send({ type: 'cancel', id: m.id, from: 'sender' });
+      toPeer({ type: 'cancel', id: m.id, from: 'sender' });
       return;
     }
     if (!OUT_ACTIVE.includes(t.state)) return;
     const offset = Math.max(0, Math.min(t.size, Math.floor(+m.offset || 0)));
-    // Chunks are sent as file slices that the browser reads itself. If the file
-    // can't be read any more (deleted, access revoked), the browser would fail the
-    // whole connection instead, so check first.
-    try { await t.file.slice(offset, offset + 1).arrayBuffer(); }
-    catch (_) { endOut(t, 'failed', 'Could not read file'); send({ type: 'cancel', id: t.id, from: 'sender' }); return; }
-    if (!OUT_ACTIVE.includes(t.state)) return;  // cancelled meanwhile
     t.sent = t.acked = t.base = offset;
     t.started = performance.now();
     t.state = 'sending'; t.paused = false;
@@ -600,11 +785,20 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
           dv.setUint32(0, t.id);
           dv.setUint32(4, Math.floor(start / 4294967296));
           dv.setUint32(8, start >>> 0);
-          sock.send(new Blob([hdr, t.file.slice(start, end)]));  // read by the browser, no copy in JS
+          // read the chunk (and seal it, with encryption), noting its checksum
+          const c = chan;
+          let data, box;
+          try {
+            data = new Uint8Array(await t.file.slice(start, end).arrayBuffer());
+            if (keyText) box = await c.sealChunk(hdr, data);
+          } catch (_) { endOut(t, 'failed', 'Could not read file'); toPeer({ type: 'cancel', id: t.id, from: 'sender' }); break; }
+          if (c !== chan || ws !== sock || t.sent !== start || t.state !== 'sending' || t.paused) continue;  // changed meanwhile
+          t.crcs[start / CHUNK] = Check.crc32(data);
+          wire(keyText ? box : data, hdr);
           t.sent = end;
           render(t);
         }
-        if (t.state === 'sending' && !t.paused && t.sent >= t.size) { send({ type: 'eof', id: t.id }); t.state = 'finishing'; }
+        if (t.state === 'sending' && !t.paused && t.sent >= t.size) { toPeer({ type: 'eof', id: t.id, crc: Check.fingerprint(t.crcs, t.size) }); t.state = 'finishing'; }
         render(t);
         const qi = sendQueue.indexOf(t);
         if (qi >= 0) sendQueue.splice(qi, 1);
@@ -615,7 +809,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   function cancelOutgoing(t) {
     if (!OUT_ACTIVE.includes(t.state)) return;
     endOut(t, 'cancelled');
-    send({ type: 'cancel', id: t.id, from: 'sender' });
+    toPeer({ type: 'cancel', id: t.id, from: 'sender' });
   }
 
   // ---------- receiving ----------
@@ -623,7 +817,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const id = m.id >>> 0;
     if (incoming.has(inKey(id))) return;
     const t = { id, peer: peerId, name: String(m.name || 'file').slice(0, 255), size: Math.max(0, +m.size || 0), mime: String(m.mime || ''),
-                received: 0, lastAck: 0, state: 'offered', writer: null, chunks: null, chain: Promise.resolve(), started: 0, base: 0, paused: false };
+                received: 0, lastAck: 0, crcs: [], checked: 0, state: 'offered', writer: null, chain: Promise.resolve(), started: 0, base: 0, paused: false };
     incoming.set(inKey(id), t);
     createRow(t, true);
     render(t);
@@ -632,12 +826,16 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   async function acceptIncoming(t) {
     if (t.state !== 'offered') return;
+    if (tooBigForMemory(t) && !confirm('This browser keeps received files in memory until they are complete, and ' +
+        fmtSize(t.size) + ' may be more than it allows: the page could crash and the transfer fail.' +
+        (window.isSecureContext ? '' : ' Opened over HTTPS, the page saves received files to storage instead.') +
+        '\n\nAccept anyway?')) return;
     t.state = 'saving'; render(t);
-    let writer = null;
+    let writer = null, handle = null;
     if (typeof window.showSaveFilePicker === 'function') {
       setPicking(true, 'save');
       try {
-        const handle = await window.showSaveFilePicker({ suggestedName: t.name });
+        handle = await window.showSaveFilePicker({ suggestedName: t.name });
         writer = await handle.createWritable();
       } catch (e) {
         if (e && e.name === 'AbortError') { setPicking(false); if (t.state === 'saving') { t.state = 'offered'; render(t); } return; }
@@ -646,15 +844,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       setPicking(false);
     }
     if (!writer && t.state === 'saving') writer = await streamWriter(t).catch(() => null);
+    if (!writer && t.state === 'saving') writer = await storageWriter(t).catch(() => null);
     if (t.state !== 'saving') { if (writer) writer.abort().catch(() => {}); return; }
-    t.writer = writer;
-    t.via = writer ? (writer.via || 'picker') : 'memory';
-    t.chunks = writer ? null : [];
+    if (!writer && !memoryOnly && t.size > 1 << 30) toast('Not enough space in this browser’s storage: receiving into memory, which may fail', true);
+    t.writer = writer || memoryWriter(t);
+    t.via = t.writer.via || 'picker';
+    if (t.via === 'picker') t.handle = handle;  // to open the saved file later
     t.state = 'receiving'; t.started = performance.now();
     // if the connection dropped while the save dialog was open, accepting is
     // repeated when the other device is back (see resumeWithPeer)
     t.paused = !peerConnected;
-    send({ type: 'accept', id: t.id, offset: 0 });
+    toPeer({ type: 'accept', id: t.id, offset: 0 });
     render(t);
   }
 
@@ -666,7 +866,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   // and a transfer that "completes" without a file would be worse than the
   // in-memory fallback.
   const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const swReady = window.isSecureContext && 'serviceWorker' in navigator && !isIOS
+  const swEligible = window.isSecureContext && 'serviceWorker' in navigator && !isIOS;
+  const swReady = swEligible
     ? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).catch(() => null)
     : Promise.resolve(null);
   let streamsOpen = 0;
@@ -674,6 +875,56 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   // is open, including while a transfer is paused waiting for a reconnect.
   setInterval(() => { if (streamsOpen) swReady.then((r) => r && r.active && r.active.postMessage({ type: 'ping' })); }, 10000);
   const withTimeout = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+
+  // ---------- receiving into browser storage, or memory ----------
+  // Where there is neither a save dialog nor streaming (iPhone, iPad, Safari),
+  // the file goes into the site's private storage (OPFS) on disk and is saved
+  // from there when complete. All writers share one interface: write / close /
+  // abort; close() may return the finished file for the page to save.
+  const OPFS = window.isSecureContext && !!(navigator.storage && navigator.storage.getDirectory) &&
+    !!window.FileSystemFileHandle && 'createWritable' in FileSystemFileHandle.prototype;
+  async function storageWriter(t) {
+    if (!OPFS) return null;
+    const { quota, usage } = await navigator.storage.estimate();
+    if (quota - usage < t.size + (64 << 20)) return null;  // not enough room
+    const dir = await navigator.storage.getDirectory(), name = 'rx-' + randomHex(8);
+    keepWhileOpen(name);
+    const handle = await dir.getFileHandle(name, { create: true });
+    const w = await handle.createWritable();
+    return {
+      via: 'storage',
+      write: (data) => w.write(data.slice()),  // a plain copy: some browsers mishandle views into larger buffers
+      async close() { await w.close(); return handle.getFile(); },
+      async abort() { await w.abort().catch(() => {}); await dir.removeEntry(name).catch(() => {}); },
+    };
+  }
+  // Files stay in storage while their page is open (Save again, Open). Each page
+  // holds a lock per file; files nobody holds are left over from closed or
+  // crashed pages and are deleted.
+  const keepWhileOpen = (name) => navigator.locks && navigator.locks.request('ezxfer:' + name, () => new Promise(() => {}));
+  if (OPFS && navigator.locks) Promise.all([navigator.storage.getDirectory(), navigator.locks.query()]).then(async ([dir, locks]) => {
+    const held = new Set(locks.held.map((l) => l.name));
+    for await (const name of dir.keys()) if (name.startsWith('rx-') && !held.has('ezxfer:' + name)) dir.removeEntry(name).catch(() => {});
+  }).catch(() => {});
+
+  // The last resort: collect the file in memory. Every 64 MB the pieces become
+  // one Blob, which Chrome can move out of the page's memory (to disk if needed);
+  // other browsers keep it all in memory, which phones can't do for many GB.
+  function memoryWriter(t) {
+    let blobs = [], pieces = [], bytes = 0;
+    return {
+      via: 'memory',
+      async write(data) {
+        pieces.push(data);
+        if ((bytes += data.byteLength) >= 64 << 20) { blobs.push(new Blob(pieces)); pieces = []; bytes = 0; }
+      },
+      async close() { return new Blob([...blobs, ...pieces], { type: t.mime || 'application/octet-stream' }); },
+      async abort() { blobs = pieces = []; },
+    };
+  }
+  // Warn before accepting a file that can only go to memory and is large for it.
+  const memoryOnly = typeof window.showSaveFilePicker !== 'function' && !swEligible && !OPFS;
+  const tooBigForMemory = (t) => memoryOnly && t.size > 1 << 30;
 
   // Returns a writer like FileSystemWritableFileStream's (write/close/abort), or
   // null if streaming isn't possible here, in which case the caller falls back.
@@ -699,7 +950,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
         fail(t, 'Download cancelled');
       }
     };
-    const url = '/dl/' + randomHex(8) + '/' + encodeURIComponent(t.name);
+    // No file name in the URL: if the worker doesn't answer, the request goes to the server.
+    // The worker names the download itself (Content-Disposition).
+    const url = '/dl/' + randomHex(16);
     reg.active.postMessage({ type: 'register', path: url, name: t.name, size: t.size, mime: t.mime }, [port2]);
     const frame = el('iframe');
     frame.hidden = true;
@@ -736,80 +989,101 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function declineIncoming(t) {
-    if (t.state === 'offered' || t.state === 'saving') { endIn(t, 'declined'); send({ type: 'decline', id: t.id }); }
-    else if (t.state === 'receiving') { endIn(t, 'cancelled'); send({ type: 'cancel', id: t.id, from: 'receiver' }); }
+    if (t.state === 'offered' || t.state === 'saving') { endIn(t, 'declined'); toPeer({ type: 'decline', id: t.id }); }
+    else if (t.state === 'receiving' || t.state === 'checking') { endIn(t, 'cancelled'); toPeer({ type: 'cancel', id: t.id, from: 'receiver' }); }
   }
 
   function abortWriter(t) {
     if (t.writer) { const w = t.writer; t.writer = null; t.chain.then(() => w.abort()).catch(() => {}); }
-    t.chunks = null;
   }
 
   function ack(t, bytes) {
-    if (bytes - t.lastAck >= ACK_EVERY || bytes === t.size) { t.lastAck = bytes; send({ type: 'ack', id: t.id, bytes }); }
+    if (bytes - t.lastAck >= ACK_EVERY || bytes === t.size) { t.lastAck = bytes; toPeer({ type: 'ack', id: t.id, bytes }); }
   }
 
-  function onBinary(buf) {
-    if (buf.byteLength < HDR) return;
-    const dv = new DataView(buf);
+  function onChunk(header, data) {  // data: the plaintext, opened by receive() if encrypted
+    const dv = new DataView(header.buffer, header.byteOffset, HDR);
     const t = incoming.get(inKey(dv.getUint32(0)));
     if (!t || t.state !== 'receiving' || t.paused) return;
     // Only the next expected bytes are used; anything else is left over from
     // before a reconnect and the sender is already re-sending from t.received.
     if (dv.getUint32(4) * 4294967296 + dv.getUint32(8) !== t.received) return;
-    const data = new Uint8Array(buf, HDR);
+    // chunks are 1 MB, the last one the rest: the checksums are per chunk
+    if (t.received % CHUNK || data.byteLength !== Math.min(CHUNK, t.size - t.received)) { fail(t, 'Received malformed data'); return; }
+    t.crcs[t.received / CHUNK] = Check.crc32(data);
     t.received += data.byteLength;
     const got = t.received;
     if (t.received > t.size) { fail(t, 'Received more data than announced'); return; }
-    if (t.writer) {
-      const w = t.writer;
-      t.chain = t.chain.then(() => w.write(data)).then(() => ack(t, got));
-      t.chain.catch(() => fail(t, 'Could not write file'));
-    } else {
-      t.chunks.push(data);
-      ack(t, got);
-    }
+    const w = t.writer;
+    t.chain = t.chain.then(() => w.write(data)).then(() => ack(t, got));
+    t.chain.catch(() => fail(t, 'Could not write file'));
     render(t);
   }
 
   function fail(t, reason) {
-    if (t.state !== 'receiving') return;
+    if (t.state !== 'receiving' && t.state !== 'checking') return;
     endIn(t, 'failed', reason);
-    send({ type: 'cancel', id: t.id, from: 'receiver' });
+    toPeer({ type: 'cancel', id: t.id, from: 'receiver', reason });
   }
 
-  function onEof(id) {
-    const t = incoming.get(inKey(id));
+  // All data is in: check it, finish the file, read it back where possible and
+  // check that too. Only then is the file reported as received.
+  function onEof(m) {
+    const t = incoming.get(inKey(m.id));
     if (!t || t.state !== 'receiving') return;
     t.chain.then(async () => {
       // an early "eof" is a leftover from before a reconnect; the resumed stream ends with its own
       if (t.state !== 'receiving' || t.paused || t.received !== t.size) return;
-      if (t.writer) { await t.writer.close(); t.writer = null; }
-      else {
-        const blob = new Blob(t.chunks, { type: t.mime || 'application/octet-stream' });
-        t.chunks = null;
-        t.url = URL.createObjectURL(blob);
-        download(t);
-      }
+      t.state = 'checking'; render(t);  // from here on, a repeated eof or accept changes nothing
       ack(t, t.size);
-      send({ type: 'done', id: t.id });
+      if (Check.fingerprint(t.crcs, t.size) !== m.crc) { fail(t, 'Damaged on the way — please send it again'); return; }
+      const w = t.writer; t.writer = null;
+      const file = await w.close();  // from storage or memory; the other writers saved it themselves
+      const saved = file || (t.handle && await t.handle.getFile());
+      if (saved && !(await Check.verify(saved, t.crcs, t.size, (n) => { t.checked = n; render(t); }))) {
+        fail(t, 'The saved file is damaged — please send it again');
+        return;
+      }
+      if (t.state !== 'checking') return;  // cancelled meanwhile
+      if (file) { t.blob = file; t.url = URL.createObjectURL(file); download(t); }
+      toPeer({ type: 'done', id: t.id });
       endIn(t, 'done');
     }).catch(() => fail(t, 'Could not save file'));
   }
 
+  // "Open" shows a received file in a new tab. Only for types the browser displays
+  // without running anything from the file: an opened file belongs to this page's
+  // origin, so e.g. HTML or SVG could run scripts with access to this page.
+  // Streamed downloads can't be opened: the page doesn't know where they went.
+  const VIEWABLE = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/[\w.+-]+|audio\/[\w.+-]+|application\/pdf|text\/plain)$/;
+  const canOpen = (t) => (t.handle || t.blob) && VIEWABLE.test(t.mime);
+  async function openFile(t) {
+    if (!t.openUrl) {
+      // the saved file, read back from disk (it may have been moved or deleted since)
+      const file = t.handle ? await t.handle.getFile().catch(() => null) : t.blob;
+      if (!file) { toast('The file can’t be opened any more', true); return; }
+      t.openUrl = URL.createObjectURL(new Blob([file], { type: t.mime }));
+    }
+    follow(t.openUrl, { target: '_blank' });
+  }
+
   function download(t) {
     maybeChoosingSaveLocation();
-    const a = el('a'); a.href = t.url; a.download = t.name; a.rel = 'noopener';
+    follow(t.url, { download: t.name });
+  }
+
+  function follow(href, attrs) {  // like clicking a link
+    const a = Object.assign(el('a'), { href, rel: 'noopener' }, attrs);
     document.body.appendChild(a); a.click(); a.remove();
   }
 
   function onCancel(m) {
     if (m.from === 'sender') {
       const t = incoming.get(inKey(m.id));
-      if (t && IN_ACTIVE.includes(t.state)) endIn(t, 'cancelled');
+      if (t) endIn(t, 'cancelled');
     } else {
-      const t = outgoing.get(m.id);
-      if (t && OUT_ACTIVE.includes(t.state)) endOut(t, 'cancelled');
+      const t = outgoing.get(m.id);  // the receiver may say why (e.g. the data was damaged)
+      if (t) m.reason ? endOut(t, 'failed', String(m.reason).slice(0, 80)) : endOut(t, 'cancelled');
     }
   }
 
@@ -818,7 +1092,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   let wakeLock = null, wakePending = false, wakeFailed = false, wakeHinted = false;
   function transfersBusy() {
     for (const t of outgoing.values()) if (t.state === 'sending' || t.state === 'finishing') return true;
-    for (const t of incoming.values()) if (t.state === 'receiving') return true;
+    for (const t of incoming.values()) if (t.state === 'receiving' || t.state === 'checking') return true;
     return false;
   }
   async function updateWakeLock() {
@@ -882,7 +1156,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   }
 
   function draw(t) {
-    const out = !!t.file, bytes = out ? t.acked : t.received;
+    const out = !!t.file, bytes = out ? t.acked : t.state === 'checking' ? t.checked : t.received;
     t.ui.row.className = 'item ' + (out ? 'outgoing ' : 'incoming ') + t.state + (t.paused ? ' paused' : '');
     const pct = t.size ? Math.min(100, bytes / t.size * 100) : (t.state === 'done' ? 100 : 0);
     t.ui.fill.style.width = pct + '%';
@@ -891,14 +1165,18 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (final) setStatus(t, [final, size], t.state === 'done' ? 'st-done' : 'st-err');
     else if (t.paused) setStatus(t, ['Paused – waiting for the other device', ...progress], 'st-warn');
     else if (t.state === 'offered') setStatus(t, [!out ? 'Wants to send you' : peerConnected
-      ? 'Waiting for the other device to accept' : 'Waiting for the other device to reconnect', size]);
+      ? 'Waiting for the other device to accept' : 'Waiting for the other device to reconnect', size,
+      !out && tooBigForMemory(t) && '⚠ Large for this browser']);
     else if (t.state === 'saving') setStatus(t, ['Choose where to save…', size]);
+    else if (t.state === 'checking') setStatus(t, ['Checking the file…', Math.floor(pct) + '%']);
+    else if (t.state === 'finishing' && t.acked >= t.size) setStatus(t, ['The other device is checking the file…', size]);
     else setStatus(t, [...progress, speed(t, bytes)]);  // sending, finishing, receiving
 
     const acts = out ? (OUT_ACTIVE.includes(t.state) ? [['Cancel', 'ghost', () => cancelOutgoing(t)]] : [])
       : t.state === 'offered' ? [['Decline', 'ghost', () => declineIncoming(t)], ['Accept', 'primary', () => acceptIncoming(t)]]
-      : t.state === 'receiving' ? [['Cancel', 'ghost', () => declineIncoming(t)]]
-      : t.state === 'done' && t.url ? [['Save again', 'ghost', () => download(t)]] : [];
+      : t.state === 'receiving' || t.state === 'checking' ? [['Cancel', 'ghost', () => declineIncoming(t)]]
+      : t.state === 'done' ? [...(canOpen(t) ? [['Open', 'ghost', () => openFile(t)]] : []), ...(t.url ? [['Save again', 'ghost', () => download(t)]] : [])]
+      : [];
     const sig = acts.map((a) => a[0]).join();
     if (t.ui.sig !== sig) {  // keep buttons stable across progress updates
       t.ui.sig = sig;
@@ -921,9 +1199,17 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (on) pickerAway = false;
     // always (re)announce a start: the other side forgets it when we reconnect
     if (picking === on && !on) return;
+    if (picking && !on) pickClosed = performance.now();
     picking = on;
-    send({ type: 'picking', active: on, what });
+    toPeer({ type: 'picking', active: on, what });
   }
+  // Our own connection dropping while our picker is open (or just closed: the drop
+  // is often noticed only then) is no news either. Like the other device, which
+  // only reports it after PICK_GRACE, say nothing about it until then.
+  let pickClosed = -Infinity, droppedPicking = 0;
+  const ownPickerOpen = () => picking || performance.now() - pickClosed < 10000;
+  const pickerDropQuiet = () => droppedPicking > 0 && performance.now() - droppedPicking < PICK_GRACE;
+
   // Starting a download may or may not make the browser ask where to save
   // (Chrome on Android does, depending on its settings). Announce it, and take it
   // back if the page wasn't left for a prompt within a few seconds.
@@ -953,11 +1239,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   });
   $('acceptAll').addEventListener('click', () => { for (const t of incoming.values()) if (t.state === 'offered') acceptIncoming(t); });
   $('copyBtn').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(joinUrl); toast('Link copied'); }
-    catch (_) {
-      const r = document.createRange(); r.selectNodeContents($('link'));
-      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
-      toast('Link selected — copy it manually');
+    try { await navigator.clipboard.writeText(joinLink); toast('Link copied'); }
+    catch (_) {  // no clipboard API (plain HTTP): the old way, else show it to copy by hand
+      const t = Object.assign(el('textarea'), { value: joinLink });
+      document.body.appendChild(t); t.select();
+      const copied = document.execCommand('copy'); t.remove();
+      if (copied) toast('Link copied'); else prompt('Copy this link:', joinLink);
     }
   });
   $('joinForm').addEventListener('submit', (e) => {
@@ -968,6 +1255,30 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     $('joinCode').value = '';
     leave(code);
   });
+  $('e2eBox').hidden = !(location.protocol === 'https:' && E2E.available);  // offered with HTTPS only
+  $('e2eToggle').addEventListener('change', (e) => {
+    wantE2E = e.target.checked;
+    setKey(wantE2E ? E2E.newKey() : null, true);
+    if (greeting) rxQueue = rxQueue.then(startHandshake);  // a device is already here: start over
+  });
+  $('keyForm').addEventListener('submit', submitKey);
+  // Shape the key while it's typed or pasted: capitals, and a dash as soon as a group of 5 is complete.
+  $('keyInput').addEventListener('input', (e) => {
+    const input = e.target, keyChars = (t) => t.toUpperCase().match(/[A-HJ-NP-Z2-9]/g) || [];
+    const chars = keyChars(input.value);
+    let at = keyChars(input.value.slice(0, input.selectionStart)).length;  // key characters before the cursor
+    // Backspace that only removed a dash (e.g. the one just added): remove the character before it.
+    if (e.inputType === 'deleteContentBackward' && chars.join('') === input.dataset.chars && at > 0) chars.splice(--at, 1);
+    chars.length = Math.min(chars.length, 20);
+    at = Math.min(at, chars.length);
+    input.value = chars.join('').replace(/.{5}/g, '$&-').slice(0, 23);  // no dash after the last group
+    input.dataset.chars = chars.join('');
+    const caret = at + Math.floor(Math.min(at, 19) / 5);  // after the dash that follows a full group
+    input.setSelectionRange(caret, caret);
+    $('keyErr').textContent = '';
+  });
+  $('keyDialog').addEventListener('cancel', (e) => e.preventDefault());  // Esc: choose Connect or Leave
+  $('keyLeave').addEventListener('click', () => { $('keyDialog').close(); history.replaceState(null, '', location.pathname); leave(null); });
   $('leaveBtn').addEventListener('click', () => { history.replaceState(null, '', location.pathname); leave(null); });
   window.addEventListener('beforeunload', (e) => {
     if (transfersBusy()) { e.preventDefault(); e.returnValue = ''; }
@@ -979,8 +1290,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   // expose a tiny hook for automated tests
   window.ezxfer = {
-    get session() { return session; }, get url() { return joinUrl; }, get connected() { return peerConnected; },
+    get session() { return session; }, get url() { return joinUrl; }, get joinLink() { return joinLink; }, get connected() { return peerConnected; },
     get resumes() { return resumes; }, get connections() { return connections; },
+    get encrypted() { return peerConnected && !!chan; }, get rejected() { return rejected; },
     transfers: () => [...outgoing.values(), ...incoming.values()].map((t) => ({
       name: t.name, dir: t.file ? 'out' : 'in', state: t.state, paused: !!t.paused, via: t.via, bytes: t.file ? t.acked : t.received })),
     // Simulates a connection that died silently: the socket stays "open" but nothing arrives.
@@ -993,8 +1305,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     },
   };
 
-  const initial = new URLSearchParams(location.search).get('s');
-  connect(initial ? initial.toUpperCase() : null);
+  const initial = (new URLSearchParams(location.search).get('s') || '').toUpperCase();
+  // A join link with a key (#k=…): keep the key for that session (see loadKey).
+  const linkKey = E2E.normalizeKey(new URLSearchParams(location.hash.slice(1)).get('k'));
+  if (initial && linkKey) try { sessionStorage.setItem('ezxfer-key:' + initial, JSON.stringify({ key: linkKey, own: false })); } catch (_) {}
+  connect(initial || null);
 })();
 </script>
 </body>

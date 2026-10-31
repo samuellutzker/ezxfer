@@ -43,6 +43,8 @@ console.log(`mode: ${TLS ? 'HTTPS/WSS (self-signed certificate, trusted by the t
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 let passed = 0;
 function ok(name, extra = '') { passed++; console.log(`  ok  ${name}${extra ? '  ' + extra : ''}`); }
+// A valid key that differs from `k`.
+const E2E_wrongKey = (k) => (k[0] === 'A' ? 'B' : 'A') + k.slice(1);
 function assert(c, msg) { if (!c) throw new Error('assertion failed: ' + msg); }
 
 const port = await new Promise((res) => { const s = net.createServer().listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); });
@@ -64,15 +66,20 @@ const mockSavePicker = () => {
   window.__saved = {};
   window.showSaveFilePicker = async ({ suggestedName }) => {
     if (window.__pickerDelay) await new Promise((r) => setTimeout(r, window.__pickerDelay));  // user choosing a place
+    let saved = null;
     return {
+    getFile: async () => { if (!saved) throw new DOMException('not found', 'NotFoundError'); return saved; },
     createWritable: async () => {
       const parts = [];
       return {
         write: async (d) => {
           if (window.__writeRate) await new Promise((r) => setTimeout(r, d.byteLength / window.__writeRate * 1000));
-          parts.push(new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d)); },
+          const bytes = new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d);
+          if (window.__corruptNextWrite && bytes.length) { window.__corruptNextWrite = false; bytes[0] ^= 1; }  // a faulty disk or browser
+          parts.push(bytes); },
         close: async () => {
           const blob = new Blob(parts);
+          saved = new File(parts, suggestedName);
           const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
           window.__saved[suggestedName] = { size: blob.size, sha: [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('') };
         },
@@ -96,6 +103,39 @@ const mockWakeLock = () => {
     },
   } });
 };
+
+// Records every WebSocket frame the page sends and receives, as the network sees it.
+const recordFrames = () => {
+  window.__frames = { out: [], in: [] };
+  const send = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (d) {
+    window.__frames.out.push(d instanceof Blob ? d.arrayBuffer().then((b) => new Uint8Array(b)) : d);
+    return send.call(this, d);
+  };
+  window.WebSocket = class extends window.WebSocket {
+    constructor(...a) { super(...a); window.__sock = this; this.addEventListener('message', (e) => window.__frames.in.push(e.data)); }
+  };
+  // Which of `needles` (strings) appear in any recorded frame, in either direction.
+  window.__leaks = async (needles) => {
+    const frames = await Promise.all([...window.__frames.out, ...window.__frames.in]);
+    const bytes = frames.map((f) => (typeof f === 'string' ? new TextEncoder().encode(f) : new Uint8Array(f)));
+    const has = (hay, n) => { outer: for (let i = 0; i + n.length <= hay.length; i++) { for (let j = 0; j < n.length; j++) if (hay[i + j] !== n[j]) continue outer; return true; } return false; };
+    return needles.filter((s) => bytes.some((b) => has(b, new TextEncoder().encode(s))));
+  };
+  // What the page put on the wire: text frame types, and binary frame sizes.
+  window.__sent = async () => (await Promise.all(window.__frames.out)).map((f) => (typeof f === 'string' ? JSON.parse(f).type : f.byteLength));
+};
+
+// Decodes the page's QR code image, as a phone camera would.
+async function scanQR(page) {
+  await page.addScriptTag({ path: jsqr.file });
+  return page.evaluate(() => {
+    const c = document.createElement('canvas'); c.width = c.height = 400;
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 400, 400); g.drawImage(document.getElementById('qr'), 0, 0, 400, 400);
+    const r = window.jsQR(g.getImageData(0, 0, 400, 400).data, 400, 400);
+    return r && r.data;
+  });
+}
 
 const row = (page, list, name) => page.locator(`#${list} .item`, { has: page.locator('.name', { hasText: name }) });
 
@@ -129,14 +169,7 @@ try {
   // ---------- "scan" the QR code from the rendered image ----------
   let scanned = joinUrl;
   if (jsqr) {
-    await A.addScriptTag({ path: jsqr.file });
-    scanned = await A.evaluate(() => {
-      const img = document.getElementById('qr');
-      const c = document.createElement('canvas'); c.width = c.height = 400;
-      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, 400, 400); g.drawImage(img, 0, 0, 400, 400);
-      const r = window.jsQR(g.getImageData(0, 0, 400, 400).data, 400, 400);
-      return r && r.data;
-    });
+    scanned = await scanQR(A);
     assert(scanned === joinUrl, `QR decodes to join URL (${scanned} vs ${joinUrl})`);
     ok('QR code scans to the join URL', scanned);
   } else console.log('  --  jsqr not installed, skipping QR scan check');
@@ -148,6 +181,10 @@ try {
   await phoneCtx.addInitScript(() => { delete window.showSaveFilePicker; });
   // ...and older iOS versions have no Screen Wake Lock API
   await phoneCtx.addInitScript(() => { delete Navigator.prototype.wakeLock; });
+  // (lets the test hand the page messages as if they came from the network)
+  await phoneCtx.addInitScript(() => {
+    window.WebSocket = class extends window.WebSocket { constructor(...a) { super(...a); window.__sock = this; } };
+  });
   const B = await phoneCtx.newPage(); watch(B, 'phone');
   await B.goto(scanned);
   await A.waitForFunction(() => document.body.classList.contains('connected'));
@@ -185,7 +222,26 @@ try {
   assert(got.length === big.length && sha(got) === sha(big), 'downloaded bytes match');
   await row(A, 'outList', 'holiday-video.mp4').locator('.st-done').waitFor();
   await row(B, 'inList', 'holiday-video.mp4').locator('.st-done').waitFor();
-  ok('desktop -> phone 9 MB transfer (download fallback), bytes identical', `${Date.now() - t0} ms`);
+  // iOS has no save dialog or streamed downloads: over HTTPS the file goes through
+  // the browser's storage on disk, over plain HTTP through memory
+  const phoneVia = await B.evaluate(() => window.ezxfer.transfers().find((t) => t.name === 'holiday-video.mp4').via);
+  assert(phoneVia === (TLS ? 'storage' : 'memory'), 'phone received via ' + phoneVia);
+  ok(`desktop -> phone 9 MB transfer (${phoneVia}), bytes identical`, `${Date.now() - t0} ms`);
+
+  // A file of many GB that could only be kept in memory: warned about before accepting.
+  await B.evaluate(() => window.__sock.onmessage({ data: JSON.stringify({ type: 'offer', id: 4711, name: 'huge.mov', size: 9.2e9, mime: 'video/quicktime' }) }));
+  const huge = row(B, 'inList', 'huge.mov');
+  await huge.locator('.status', { hasText: 'Wants to send you' }).waitFor();
+  assert((await huge.locator('.status').textContent()).includes('Large for this browser') === !TLS, 'warning only where memory is the only way');
+  if (!TLS) {
+    let asked = '';
+    B.once('dialog', (d) => { asked = d.message(); d.dismiss(); });
+    await huge.getByRole('button', { name: 'Accept' }).click();
+    assert(/in memory/.test(asked) && /8\.6 GB/.test(asked) && /HTTPS/.test(asked), 'asked before accepting: ' + asked);
+    assert((await B.evaluate(() => window.ezxfer.transfers().find((t) => t.name === 'huge.mov').state)) === 'offered', 'not accepted');
+  }
+  await huge.getByRole('button', { name: 'Decline' }).click();
+  ok(TLS ? 'a huge offer needs no warning where files go to storage' : 'a huge offer that could only go to memory is warned about; declining the warning keeps it offered');
 
   // the sender held a screen wake lock while sending and let it go afterwards
   await A.waitForFunction(() => !window.__wake.held);
@@ -211,6 +267,51 @@ try {
   assert(saved.size === photo.length && saved.sha === sha(photo), 'picker-saved bytes match');
   await row(B, 'outList', 'IMG_0042.HEIC').locator('.st-done').waitFor();
   ok('phone -> desktop 3 MB transfer (save-file picker), bytes identical', `${Date.now() - t0} ms`);
+
+  // ---------- received files can be opened ----------
+  // saved through the dialog: read back from disk; held in memory (the phone): from there
+  await B.setInputFiles('#fileInput', [
+    { name: 'chart.png', mimeType: 'image/png', buffer: randomBytes(5000) },
+    { name: 'page.html', mimeType: 'text/html', buffer: Buffer.from('<script>alert(1)</script>') },
+  ]);
+  for (const n of ['chart.png', 'page.html']) {
+    await row(A, 'inList', n).getByRole('button', { name: 'Accept' }).click();
+    await row(A, 'inList', n).locator('.st-done').waitFor();
+  }
+  const [shown] = await Promise.all([desk.waitForEvent('page'), row(A, 'inList', 'chart.png').getByRole('button', { name: 'Open' }).click()]);
+  assert(shown.url().startsWith('blob:'), 'opened in a new tab: ' + shown.url());
+  await shown.waitForLoadState();
+  const shownType = await shown.evaluate(() => document.contentType);
+  assert(shownType === 'image/png', 'opened as ' + shownType);
+  await shown.close();
+  assert((await row(A, 'inList', 'page.html').getByRole('button', { name: 'Open' }).count()) === 0, 'no Open for HTML');
+  const [shownB] = await Promise.all([phoneCtx.waitForEvent('page'), row(B, 'inList', 'holiday-video.mp4').getByRole('button', { name: 'Open' }).click()]);
+  assert(shownB.url().startsWith('blob:'), 'phone opened the in-memory file: ' + shownB.url());
+  assert(await row(B, 'inList', 'holiday-video.mp4').getByRole('button', { name: 'Save again' }).isVisible(), 'Save again still offered');
+  await shownB.close();
+  ok('received images and videos open in a new tab (from disk or memory); HTML is not opened');
+
+  // ---------- damaged data is caught, not saved as if it were fine ----------
+  // on the way: one bit of one chunk flipped as it arrives at the phone
+  await B.evaluate(() => {
+    const sock = window.__sock, deliver = sock.onmessage;
+    let armed = true;
+    sock.onmessage = (e) => {
+      if (armed && e.data instanceof ArrayBuffer && e.data.byteLength > 1000) { armed = false; new Uint8Array(e.data)[500] ^= 1; }
+      deliver(e);
+    };
+  });
+  await A.setInputFiles('#fileInput', { name: 'flipped.bin', mimeType: 'application/octet-stream', buffer: randomBytes(2500000) });
+  await row(B, 'inList', 'flipped.bin').getByRole('button', { name: 'Accept' }).click();
+  await row(B, 'inList', 'flipped.bin').locator('.st-err', { hasText: 'Damaged on the way' }).waitFor();
+  await row(A, 'outList', 'flipped.bin').locator('.st-err', { hasText: 'Damaged on the way' }).waitFor();
+  // on writing: the desktop's save writes one wrong byte, which only reading the file back shows
+  await A.evaluate(() => { window.__corruptNextWrite = true; });
+  await B.setInputFiles('#fileInput', { name: 'badly-saved.bin', mimeType: 'application/octet-stream', buffer: randomBytes(1500000) });
+  await row(A, 'inList', 'badly-saved.bin').getByRole('button', { name: 'Accept' }).click();
+  await row(A, 'inList', 'badly-saved.bin').locator('.st-err', { hasText: 'saved file is damaged' }).waitFor();
+  await row(B, 'outList', 'badly-saved.bin').locator('.st-err', { hasText: 'saved file is damaged' }).waitFor();
+  ok('damage on the way or in the saved file is reported on both devices, not saved as received');
 
   // ---------- several files queued at once ----------
   const files = [1, 2, 3].map((i) => ({ name: `doc-${i}.pdf`, mimeType: 'application/pdf', buffer: randomBytes(400000 * i) }));
@@ -319,6 +420,14 @@ try {
   ok('sender drops mid-transfer, reconnects and resumes; bytes identical');
 
   // ---------- choosing files: a connection drop meanwhile is expected, not reported ----------
+  // (on either side: the phone itself doesn't announce reconnecting either)
+  const recordToasts = (page) => page.evaluate(() => {
+    window.__toasts = [];
+    new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => window.__toasts.push(n.textContent))))
+      .observe(document.getElementById('toasts'), { childList: true });
+  });
+  const reconnectToasts = (page) => page.evaluate(() => window.__toasts.filter((t) => /reconnect/i.test(t)));
+  await recordToasts(B);
   const [chooser] = await Promise.all([B.waitForEvent('filechooser'), B.click('#drop')]);
   await A.waitForFunction(() => document.getElementById('pillText').textContent === 'Choosing files…');
   // Android drops the connection while its picker is open and can't reconnect
@@ -338,6 +447,7 @@ try {
   assert((await A.evaluate(() => window.__saved['chosen.jpg'].sha)) === sha(chosen), 'chosen file intact');
   assert((await A.textContent('#pillText')) === 'Connected', 'pill back to connected');
   assert((await A.locator('.toast', { hasText: 'disconnected' }).count()) === 0, 'still no disconnect message');
+  assert((await reconnectToasts(B)).length === 0, 'the phone says nothing either: ' + await reconnectToasts(B));
   ok('connection lost while choosing files shows "Choosing files…", not a disconnect');
 
   // ...whereas losing the connection otherwise (e.g. app backgrounded) is reported
@@ -377,6 +487,7 @@ try {
   await B.evaluate(() => window.dispatchEvent(new Event('focus')));  // back from the prompt
   await A.waitForFunction(() => window.ezxfer.connected && document.getElementById('pillText').textContent === 'Connected');
   await row(A, 'outList', 'to-phone.pdf').locator('.st-done').waitFor();
+  assert((await reconnectToasts(B)).length === 0, 'the phone says nothing either: ' + await reconnectToasts(B));
   ok('phone choosing a save location: connection loss shows as "Choosing where to save…", not a disconnect');
 
   // without a prompt (page not left), the announcement is withdrawn after 3 s
@@ -448,6 +559,7 @@ try {
   const droidCtx = await browser.newContext({ ...devices['Pixel 7'], acceptDownloads: true, ignoreHTTPSErrors: true });
   await droidCtx.addInitScript(() => { delete window.showSaveFilePicker; });  // as on Android Chrome
   const P = await droidCtx.newPage(); watch(P, 'android');
+  const droidUrls = []; P.on('request', (r) => droidUrls.push(r.url()));
   await P.goto(`${SCHEME}://127.0.0.1:${port}/?s=${session}`);
   await P.waitForFunction(() => document.body.classList.contains('connected'));
   await A.waitForFunction(() => document.getElementById('peerName').textContent === 'Android phone');
@@ -466,6 +578,7 @@ try {
   assert(apkDl.suggestedFilename() === 'app-release.apk', 'streamed filename ' + apkDl.suggestedFilename());
   const gotApk = fs.readFileSync(await apkDl.path());
   assert(gotApk.length === 40 * 1024 * 1024 && sha(gotApk) === apkSha, 'streamed download identical');
+  assert(!droidUrls.some((u) => u.includes('app-release')), 'file name in a request URL: ' + droidUrls.filter((u) => u.includes('app-release')));
   await row(A, 'outList', 'app-release.apk').locator('.st-done').waitFor();
   const heap = await P.evaluate(() => performance.memory ? performance.memory.usedJSHeapSize : 0);
   fs.unlinkSync(apkPath);
@@ -537,6 +650,179 @@ try {
     fs.unlinkSync(bgPath);
     await slowCtx.close(); await R1.context().close();
     ok('sender with background-tab timer throttling keeps full speed', `64 MB in ${secs.toFixed(1)} s`);
+  }
+
+  // ---------- end-to-end encryption ----------
+  if (!TLS) {
+    assert(await A.evaluate(() => document.getElementById('e2eBox').hidden), 'no encryption option without HTTPS');
+    ok('end-to-end encryption is not offered over plain HTTP');
+  } else {
+    const ctx = async (label) => {
+      const c = await browser.newContext({ ignoreHTTPSErrors: true });
+      await c.addInitScript(recordFrames); await c.addInitScript(mockSavePicker);
+      const p = await c.newPage(); watch(p, label);
+      p.urls = []; p.on('request', (r) => p.urls.push(r.url().split('#')[0]));  // what the server gets to see
+      return p;
+    };
+    const MARK = 'SECRET-FILE-CONTENT-', NAME = 'top-secret-plans.pdf';
+    const secretFile = (n) => Buffer.concat([Buffer.from(MARK.repeat(1000)), randomBytes(n)]);
+    const transfer = async (from, to, name, buf) => {
+      await from.setInputFiles('#fileInput', { name, mimeType: 'application/pdf', buffer: buf });
+      await row(to, 'inList', name).getByRole('button', { name: 'Accept' }).click();
+      await to.waitForFunction((n) => window.__saved[n], name, { timeout: 60000 });
+      assert((await to.evaluate((n) => window.__saved[n].sha, name)) === sha(buf), `${name} arrives intact`);
+    };
+
+    // control: without encryption the recorder does see the file and its name
+    const H0 = await ctx('plain-host'), P0 = await ctx('plain-peer');
+    await H0.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await H0.waitForFunction(() => window.ezxfer.session);
+    assert(!(await H0.isChecked('#e2eToggle')) && (await H0.isVisible('#e2eToggle')), 'offered with HTTPS, off by default');
+    await P0.goto(await H0.evaluate(() => window.ezxfer.url));
+    await H0.waitForFunction(() => window.ezxfer.connected);
+    assert(!(await H0.evaluate(() => window.ezxfer.encrypted)) && (await H0.isHidden('#lock')), 'plain session');
+    await transfer(H0, P0, NAME, secretFile(1000));
+    const plainLeaks = await H0.evaluate((n) => window.__leaks(n), [MARK, NAME]);
+    assert(plainLeaks.length === 2, 'control: plaintext visible without encryption: ' + plainLeaks);
+    await H0.context().close(); await P0.context().close();
+    ok('encryption is offered over HTTPS, off by default; without it file data is visible on the wire (control)');
+
+    // host turns encryption on: the key appears and goes into the link and QR code
+    const H = await ctx('e2e-host'), P = await ctx('e2e-peer');
+    await H.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await H.waitForFunction(() => window.ezxfer.session);
+    const toggleAt = (await H.locator('#e2eToggle').boundingBox()).y;
+    await H.check('#e2eToggle');
+    assert((await H.locator('#e2eToggle').boundingBox()).y === toggleAt, 'the checkbox stays where it was');
+    const key = (await H.textContent('#keyText')).trim();
+    assert(/^[A-Z2-9]{5}(-[A-Z2-9]{5}){3}$/.test(key), 'key shown: ' + key);
+    const link = await H.evaluate(() => window.ezxfer.joinLink);
+    await H.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await H.click('#copyBtn');
+    assert((await H.evaluate(() => navigator.clipboard.readText())) === link, 'copy button copies the link with the key');
+    assert(link.endsWith('#k=' + key.replace(/-/g, '')), 'link carries the key after #: ' + link);
+    if (jsqr) {
+      const qr = await scanQR(H);
+      assert(qr === link, `QR code scans to the link with the key (${qr})`);
+    }
+    // the phone opens the link from the QR code
+    await P.goto(link);
+    await H.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    await P.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    assert(await H.isVisible('#lock') && await P.isVisible('#lock'), 'both show the lock');
+    assert(!P.url().includes('#'), 'key removed from the address bar: ' + P.url());
+    await H.screenshot({ path: path.join(OUT, 'desktop-encrypted.png') });
+    ok('encrypted session: key in the QR link only, phone joins by scanning, both show the lock');
+
+    // files both ways: nothing of the contents or names is on the wire
+    const down = secretFile(3 * 1024 * 1024), up = secretFile(1500000);
+    await transfer(H, P, NAME, down);
+    await transfer(P, H, 'reply-' + NAME, up);
+    for (const pg of [H, P]) {
+      // (5+ byte needles only: shorter ones occur by chance in megabytes of ciphertext)
+      const leaks = await pg.evaluate((n) => window.__leaks(n), [MARK, NAME, 'offer', 'accept', key, key.replace(/-/g, '')]);
+      assert(leaks.length === 0, 'found on the wire: ' + leaks);
+      const sent = await pg.evaluate(() => window.__sent());
+      const types = new Set(sent.filter((t) => typeof t === 'string'));
+      assert([...types].every((t) => ['sealed', 'mode', 'ping'].includes(t)), 'text frames: ' + [...types]);
+      // chunks: header + 1 MB + 28 bytes of nonce and tag
+      const chunks = sent.filter((t) => typeof t === 'number');
+      assert(chunks.length >= 2 && chunks.includes(12 + 1024 * 1024 + 28), 'sealed chunk sizes: ' + chunks);
+      assert(!pg.urls.some((u) => u.includes(key.replace(/-/g, ''))), 'the key never went to the server');
+    }
+    ok('files sent both ways arrive intact; the wire carries only sealed boxes, no names, contents or key');
+
+    // anything not sealed with the key is ignored: injected plaintext, garbage and
+    // the device's own boxes bounced back to it
+    const own = await P.evaluate(async () => (await Promise.all(window.__frames.out)).find((f) => typeof f === 'string' && f.includes('"sealed"')));
+    const before = await P.evaluate(() => window.ezxfer.rejected);
+    await P.evaluate((ownBox) => {
+      const deliver = (data) => window.__sock.onmessage({ data });
+      deliver(JSON.stringify({ type: 'offer', id: 4242, name: 'injected.exe', size: 10, mime: '' }));
+      deliver(JSON.stringify({ type: 'sealed', box: btoa('x'.repeat(64)) }));
+      deliver(ownBox);
+      deliver(new Uint8Array(12 + 100).buffer);
+    }, own);
+    await P.waitForFunction((b) => window.ezxfer.rejected >= b + 4, before);
+    assert(!(await P.evaluate(() => window.ezxfer.transfers().some((t) => t.name === 'injected.exe'))), 'no injected offer');
+    ok('unsealed, forged and reflected messages are dropped');
+
+    // an encrypted transfer resumes after the connection drops
+    const resumeBuf = randomBytes(24 * 1024 * 1024);
+    await H.evaluate(() => { window.__writeRate = 8e6; });  // slow enough to still be running when the connection drops
+    await P.setInputFiles('#fileInput', { name: 'resume.bin', mimeType: 'application/octet-stream', buffer: resumeBuf });
+    await row(H, 'inList', 'resume.bin').getByRole('button', { name: 'Accept' }).click();
+    await H.waitForFunction(() => (window.ezxfer.transfers().find((t) => t.name === 'resume.bin') || {}).bytes > 6e6);
+    await P.evaluate(() => window.ezxfer.dropConnection(false));
+    await H.waitForFunction(() => window.__saved['resume.bin'], null, { timeout: 60000 });
+    assert((await H.evaluate(() => window.__saved['resume.bin'].sha)) === sha(resumeBuf), 'resumed encrypted transfer intact');
+    assert((await H.evaluate(() => window.ezxfer.resumes)) >= 1, 'resumed');
+    await H.evaluate(() => { window.__writeRate = 0; });
+    ok('encrypted transfer resumes after a dropped connection; bytes identical');
+
+    // the phone reloads: it keeps the key (the link no longer has it) and reconnects encrypted
+    await P.reload();
+    await P.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    await H.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    ok('reloaded page keeps the key and reconnects encrypted');
+
+    // joining by typing the code: the joiner is told a key is needed and asked for it
+    const J = await ctx('typed-joiner');
+    const H2 = await ctx('e2e-host2');
+    await H2.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await H2.waitForFunction(() => window.ezxfer.session);
+    await H2.check('#e2eToggle');
+    const key2 = (await H2.textContent('#keyText')).trim(), code2 = await H2.evaluate(() => window.ezxfer.session);
+    await J.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await J.waitForFunction(() => window.ezxfer.session);
+    await J.fill('#joinCode', code2);
+    await J.click('#joinForm button[type=submit]');
+    await J.locator('#keyDialog[open]').waitFor();
+    await H2.waitForFunction(() => document.getElementById('pillText').textContent === 'Waiting for the other device to enter the key');
+    assert(!(await J.evaluate(() => window.ezxfer.connected)) && !(await H2.evaluate(() => window.ezxfer.connected)), 'not connected yet');
+    await J.screenshot({ path: path.join(OUT, 'enter-key.png') });
+    await J.fill('#keyInput', E2E_wrongKey(key2));
+    await J.click('#keyForm button.primary');
+    await J.locator('#keyErr', { hasText: 'doesn’t match' }).waitFor();
+    // typed without dashes, they appear as you type; Backspace after a dash takes the character before it
+    await J.fill('#keyInput', '');
+    await J.locator('#keyInput').pressSequentially(key2.replace(/-/g, '').slice(0, 5).toLowerCase());
+    assert((await J.inputValue('#keyInput')) === key2.slice(0, 6), 'dash added after 5 characters: ' + await J.inputValue('#keyInput'));
+    await J.locator('#keyInput').press('-');  // typing the dash anyway changes nothing
+    assert((await J.inputValue('#keyInput')) === key2.slice(0, 6), 'no double dash: ' + await J.inputValue('#keyInput'));
+    await J.locator('#keyInput').pressSequentially(key2.replace(/-/g, '').slice(5, 11).toLowerCase());
+    assert((await J.inputValue('#keyInput')) === key2.slice(0, 13), 'formatted while typing: ' + await J.inputValue('#keyInput'));
+    await J.locator('#keyInput').press('Backspace');
+    await J.locator('#keyInput').press('Backspace');
+    assert((await J.inputValue('#keyInput')) === key2.slice(0, 10), 'backspace over the dash: ' + await J.inputValue('#keyInput'));
+    await J.locator('#keyInput').pressSequentially(key2.replace(/-/g, '').slice(9));
+    assert((await J.inputValue('#keyInput')) === key2, 'complete key: ' + await J.inputValue('#keyInput'));
+    await J.fill('#keyInput', key2.toLowerCase().replace(/-/g, ' '));  // pasted in another form
+    assert((await J.inputValue('#keyInput')) === key2, 'pasted key normalized');
+    await J.click('#keyForm button.primary');
+    await J.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    await H2.waitForFunction(() => window.ezxfer.connected && window.ezxfer.encrypted);
+    assert(!(await J.locator('#keyDialog[open]').count()), 'dialog closed');
+    await transfer(J, H2, NAME, secretFile(200000));
+    assert((await J.evaluate((n) => window.__leaks(n), [MARK, NAME])).length === 0, 'nothing leaked');
+    ok('joining by code asks for the key: a wrong key is refused, the right one connects encrypted');
+
+    // leaving from the key dialog starts an own session
+    const L = await ctx('leaver');
+    await L.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await L.waitForFunction(() => window.ezxfer.session);
+    const H3 = await ctx('e2e-host3');
+    await H3.goto(`${SCHEME}://127.0.0.1:${port}/`);
+    await H3.waitForFunction(() => window.ezxfer.session);
+    await H3.check('#e2eToggle');
+    await L.fill('#joinCode', await H3.evaluate(() => window.ezxfer.session));
+    await L.click('#joinForm button[type=submit]');
+    await L.locator('#keyDialog[open]').waitFor();
+    await L.click('#keyLeave');
+    await L.waitForFunction((s) => window.ezxfer.session && window.ezxfer.session !== s && !document.querySelector('#keyDialog[open]'),
+      await H3.evaluate(() => window.ezxfer.session));
+    ok('leaving from the key dialog goes back to an own session');
+    for (const pg of [H, P, J, H2, L, H3]) await pg.context().close();
   }
 
   // ---------- server upgraded while a page stays open ----------

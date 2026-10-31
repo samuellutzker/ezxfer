@@ -2,7 +2,7 @@
 // download manager so phones don't have to hold whole files in memory.
 //
 // The page registers a download (name, size, type) together with a
-// MessagePort, then opens /dl/<random>/<name> in a hidden iframe. That request
+// MessagePort, then opens /dl/<random> in a hidden iframe. That request
 // is answered here with a streaming Response whose body is fed, chunk by
 // chunk, with the data the page pushes through the port. Each chunk is
 // acknowledged once the download has room for more, which gives end-to-end
