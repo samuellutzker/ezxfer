@@ -74,7 +74,7 @@ The page itself is still served by ezxfer, so this protects against the relay an
 ## Good to know
 
 - Anyone with the session code can join while a slot is free. A session holds two devices.
-- Without HTTPS, and on iPhones and iPads, a received file is held in memory until it's complete. That's fine for photos and videos, but files of several GB may exceed what a phone browser allows.
+- Without HTTPS, a received file is held in memory until it's complete. That's fine for photos and videos, but files of several GB may exceed what a phone or tablet allows; the page warns before you accept one. With HTTPS, current browsers save it to disk as it arrives.
 - Reloading the page cancels its running transfers.
 
 ## Development

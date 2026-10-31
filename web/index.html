@@ -820,7 +820,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     const id = m.id >>> 0;
     if (incoming.has(inKey(id))) return;
     const t = { id, peer: peerId, name: String(m.name || 'file').slice(0, 255), size: Math.max(0, +m.size || 0), mime: String(m.mime || ''),
-                received: 0, lastAck: 0, state: 'offered', writer: null, chunks: null, chain: Promise.resolve(), started: 0, base: 0, paused: false };
+                received: 0, lastAck: 0, state: 'offered', writer: null, chain: Promise.resolve(), started: 0, base: 0, paused: false };
     incoming.set(inKey(id), t);
     createRow(t, true);
     render(t);
@@ -829,6 +829,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   async function acceptIncoming(t) {
     if (t.state !== 'offered') return;
+    if (tooBigForMemory(t) && !confirm('This browser keeps received files in memory until they are complete, and ' +
+        fmtSize(t.size) + ' may be more than it allows: the page could crash and the transfer fail.' +
+        (window.isSecureContext ? '' : ' Opened over HTTPS, the page saves received files to storage instead.') +
+        '\n\nAccept anyway?')) return;
     t.state = 'saving'; render(t);
     let writer = null, handle = null;
     if (typeof window.showSaveFilePicker === 'function') {
@@ -843,11 +847,11 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
       setPicking(false);
     }
     if (!writer && t.state === 'saving') writer = await streamWriter(t).catch(() => null);
+    if (!writer && t.state === 'saving') writer = await storageWriter(t).catch(() => null);
     if (t.state !== 'saving') { if (writer) writer.abort().catch(() => {}); return; }
-    t.writer = writer;
-    t.via = writer ? (writer.via || 'picker') : 'memory';
+    t.writer = writer || memoryWriter(t);
+    t.via = t.writer.via || 'picker';
     if (t.via === 'picker') t.handle = handle;  // to open the saved file later
-    t.chunks = writer ? null : [];
     t.state = 'receiving'; t.started = performance.now();
     // if the connection dropped while the save dialog was open, accepting is
     // repeated when the other device is back (see resumeWithPeer)
@@ -864,7 +868,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   // and a transfer that "completes" without a file would be worse than the
   // in-memory fallback.
   const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const swReady = window.isSecureContext && 'serviceWorker' in navigator && !isIOS
+  const swEligible = window.isSecureContext && 'serviceWorker' in navigator && !isIOS;
+  const swReady = swEligible
     ? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).catch(() => null)
     : Promise.resolve(null);
   let streamsOpen = 0;
@@ -872,6 +877,51 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
   // is open, including while a transfer is paused waiting for a reconnect.
   setInterval(() => { if (streamsOpen) swReady.then((r) => r && r.active && r.active.postMessage({ type: 'ping' })); }, 10000);
   const withTimeout = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+
+  // ---------- receiving into browser storage, or memory ----------
+  // Where there is neither a save dialog nor streaming (iPhone, iPad, Safari),
+  // the file goes into the site's private storage (OPFS) on disk and is saved
+  // from there when complete. All writers share one interface: write / close /
+  // abort; close() may return the finished file for the page to save.
+  const OPFS = window.isSecureContext && !!(navigator.storage && navigator.storage.getDirectory) &&
+    !!window.FileSystemFileHandle && 'createWritable' in FileSystemFileHandle.prototype;
+  async function storageWriter(t) {
+    if (!OPFS) return null;
+    const { quota, usage } = await navigator.storage.estimate();
+    if (quota - usage < t.size + (64 << 20)) return null;  // not enough room
+    const dir = await navigator.storage.getDirectory(), name = 'rx-' + randomHex(8);
+    const handle = await dir.getFileHandle(name, { create: true });
+    const w = await handle.createWritable();
+    return {
+      via: 'storage',
+      write: (data) => w.write(data),
+      async close() { await w.close(); return handle.getFile(); },
+      async abort() { await w.abort().catch(() => {}); await dir.removeEntry(name).catch(() => {}); },
+    };
+  }
+  // Files stay in storage while the page is open (Save again, Open); clear those of earlier visits.
+  if (OPFS) navigator.storage.getDirectory().then(async (dir) => {
+    for await (const name of dir.keys()) if (name.startsWith('rx-')) dir.removeEntry(name).catch(() => {});
+  }).catch(() => {});
+
+  // The last resort: collect the file in memory. Every 64 MB the pieces become
+  // one Blob, which Chrome can move out of the page's memory (to disk if needed);
+  // other browsers keep it all in memory, which phones can't do for many GB.
+  function memoryWriter(t) {
+    let blobs = [], pieces = [], bytes = 0;
+    return {
+      via: 'memory',
+      async write(data) {
+        pieces.push(data);
+        if ((bytes += data.byteLength) >= 64 << 20) { blobs.push(new Blob(pieces)); pieces = []; bytes = 0; }
+      },
+      async close() { return new Blob([...blobs, ...pieces], { type: t.mime || 'application/octet-stream' }); },
+      async abort() { blobs = pieces = []; },
+    };
+  }
+  // Warn before accepting a file that can only go to memory and is large for it.
+  const memoryOnly = typeof window.showSaveFilePicker !== 'function' && !swEligible && !OPFS;
+  const tooBigForMemory = (t) => memoryOnly && t.size > 1 << 30;
 
   // Returns a writer like FileSystemWritableFileStream's (write/close/abort), or
   // null if streaming isn't possible here, in which case the caller falls back.
@@ -942,7 +992,6 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 
   function abortWriter(t) {
     if (t.writer) { const w = t.writer; t.writer = null; t.chain.then(() => w.abort()).catch(() => {}); }
-    t.chunks = null;
   }
 
   function ack(t, bytes) {
@@ -959,14 +1008,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     t.received += data.byteLength;
     const got = t.received;
     if (t.received > t.size) { fail(t, 'Received more data than announced'); return; }
-    if (t.writer) {
-      const w = t.writer;
-      t.chain = t.chain.then(() => w.write(data)).then(() => ack(t, got));
-      t.chain.catch(() => fail(t, 'Could not write file'));
-    } else {
-      t.chunks.push(data);
-      ack(t, got);
-    }
+    const w = t.writer;
+    t.chain = t.chain.then(() => w.write(data)).then(() => ack(t, got));
+    t.chain.catch(() => fail(t, 'Could not write file'));
     render(t);
   }
 
@@ -982,14 +1026,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     t.chain.then(async () => {
       // an early "eof" is a leftover from before a reconnect; the resumed stream ends with its own
       if (t.state !== 'receiving' || t.paused || t.received !== t.size) return;
-      if (t.writer) { await t.writer.close(); t.writer = null; }
-      else {
-        const blob = new Blob(t.chunks, { type: t.mime || 'application/octet-stream' });
-        t.chunks = null;
-        t.blob = blob;
-        t.url = URL.createObjectURL(blob);
-        download(t);
-      }
+      const file = await t.writer.close();
+      t.writer = null;
+      if (file) { t.blob = file; t.url = URL.createObjectURL(file); download(t); }  // from storage or memory
       ack(t, t.size);
       toPeer({ type: 'done', id: t.id });
       endIn(t, 'done');
@@ -1110,7 +1149,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
     if (final) setStatus(t, [final, size], t.state === 'done' ? 'st-done' : 'st-err');
     else if (t.paused) setStatus(t, ['Paused – waiting for the other device', ...progress], 'st-warn');
     else if (t.state === 'offered') setStatus(t, [!out ? 'Wants to send you' : peerConnected
-      ? 'Waiting for the other device to accept' : 'Waiting for the other device to reconnect', size]);
+      ? 'Waiting for the other device to accept' : 'Waiting for the other device to reconnect', size,
+      !out && tooBigForMemory(t) && '⚠ Large for this browser']);
     else if (t.state === 'saving') setStatus(t, ['Choose where to save…', size]);
     else setStatus(t, [...progress, speed(t, bytes)]);  // sending, finishing, receiving
 

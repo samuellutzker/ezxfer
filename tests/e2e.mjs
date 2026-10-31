@@ -179,6 +179,10 @@ try {
   await phoneCtx.addInitScript(() => { delete window.showSaveFilePicker; });
   // ...and older iOS versions have no Screen Wake Lock API
   await phoneCtx.addInitScript(() => { delete Navigator.prototype.wakeLock; });
+  // (lets the test hand the page messages as if they came from the network)
+  await phoneCtx.addInitScript(() => {
+    window.WebSocket = class extends window.WebSocket { constructor(...a) { super(...a); window.__sock = this; } };
+  });
   const B = await phoneCtx.newPage(); watch(B, 'phone');
   await B.goto(scanned);
   await A.waitForFunction(() => document.body.classList.contains('connected'));
@@ -216,7 +220,26 @@ try {
   assert(got.length === big.length && sha(got) === sha(big), 'downloaded bytes match');
   await row(A, 'outList', 'holiday-video.mp4').locator('.st-done').waitFor();
   await row(B, 'inList', 'holiday-video.mp4').locator('.st-done').waitFor();
-  ok('desktop -> phone 9 MB transfer (download fallback), bytes identical', `${Date.now() - t0} ms`);
+  // iOS has no save dialog or streamed downloads: over HTTPS the file goes through
+  // the browser's storage on disk, over plain HTTP through memory
+  const phoneVia = await B.evaluate(() => window.ezxfer.transfers().find((t) => t.name === 'holiday-video.mp4').via);
+  assert(phoneVia === (TLS ? 'storage' : 'memory'), 'phone received via ' + phoneVia);
+  ok(`desktop -> phone 9 MB transfer (${phoneVia}), bytes identical`, `${Date.now() - t0} ms`);
+
+  // A file of many GB that could only be kept in memory: warned about before accepting.
+  await B.evaluate(() => window.__sock.onmessage({ data: JSON.stringify({ type: 'offer', id: 4711, name: 'huge.mov', size: 9.2e9, mime: 'video/quicktime' }) }));
+  const huge = row(B, 'inList', 'huge.mov');
+  await huge.locator('.status', { hasText: 'Wants to send you' }).waitFor();
+  assert((await huge.locator('.status').textContent()).includes('Large for this browser') === !TLS, 'warning only where memory is the only way');
+  if (!TLS) {
+    let asked = '';
+    B.once('dialog', (d) => { asked = d.message(); d.dismiss(); });
+    await huge.getByRole('button', { name: 'Accept' }).click();
+    assert(/in memory/.test(asked) && /8\.6 GB/.test(asked) && /HTTPS/.test(asked), 'asked before accepting: ' + asked);
+    assert((await B.evaluate(() => window.ezxfer.transfers().find((t) => t.name === 'huge.mov').state)) === 'offered', 'not accepted');
+  }
+  await huge.getByRole('button', { name: 'Decline' }).click();
+  ok(TLS ? 'a huge offer needs no warning where files go to storage' : 'a huge offer that could only go to memory is warned about; declining the warning keeps it offered');
 
   // the sender held a screen wake lock while sending and let it go afterwards
   await A.waitForFunction(() => !window.__wake.held);

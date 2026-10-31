@@ -171,11 +171,12 @@ incoming: offered ─▶ saving ─▶ receiving ─▶ done
 
 **Sending.** `pump()` sends one transfer at a time. Each chunk is `new Blob([header, file.slice()])`: the browser reads the file, with no copy in JavaScript. With encryption, the slice is read, sealed and sent as header + box. The loop pauses while 16 MB are unacknowledged (`MAX_INFLIGHT`). It's woken by acks (`kickPump()`), **not by timers**, because browsers throttle timers in background tabs. `onAccepted()` first reads one byte of the file, because an unreadable Blob would make the browser kill the whole WebSocket.
 
-**Receiving.** `acceptIncoming()` picks a writer. All three have the same `write/close/abort` interface:
+**Receiving.** `acceptIncoming()` picks the first writer that works. All have the same `write/close/abort` interface; `close()` may return the finished file, which the page then saves with `download()`:
 
 1. `showSaveFilePicker()`: desktop Chrome/Edge, in a secure context (HTTPS or `localhost`);
-2. `streamWriter()`: the service worker, in a secure context that isn't iOS. That means Android and desktop Firefox. iOS is excluded because WebKit doesn't reliably turn such a stream into a download, and a transfer that "completes" without a file would be worse than holding it in memory. If the download doesn't start within 5 s, the page falls back to 3.
-3. none: chunks collected in memory, then saved with `download()`. Very large files can exceed what a phone browser allows.
+2. `streamWriter()`: the service worker, in a secure context that isn't iOS. That means Android and desktop Firefox. iOS is excluded because WebKit doesn't reliably turn such a stream into a download, and a transfer that "completes" without a file would be worse than the fallbacks. If the download doesn't start within 5 s, the page falls back to the next.
+3. `storageWriter()`: the site's private storage on disk (OPFS), in a secure context with `createWritable()` and room for the file. That means iPhone, iPad and Safari over HTTPS. Files stay there while the page is open (for Save again and Open) and are deleted on the next visit.
+4. `memoryWriter()`: everything else, i.e. plain HTTP. Every 64 MB the pieces are joined into a Blob, which Chrome can move out of the page's memory; other browsers, iOS above all, keep it all in memory and may kill the tab for files of several GB. So where nothing but memory is available (`memoryOnly`), offers over 1 GB show a warning and accepting asks first.
 
 Writes are chained on `t.chain`; acks are sent after each write.
 
@@ -185,7 +186,7 @@ Writes are chained on `t.chain`; acks are sent after each write.
 
 **Other parts:**
 - `updateWakeLock()` keeps the screen on while transfers are busy.
-- `openFile()`: the "Open" button on received files, for files saved through the dialog (read back with `handle.getFile()`) or held in memory. Only for types the browser shows without running anything from the file (`VIEWABLE`): an opened `blob:` URL has this page's origin, so HTML or SVG could run scripts on it. Streamed downloads can't be opened; the page doesn't learn where they were saved.
+- `openFile()`: the "Open" button on received files, for files saved through the dialog (read back with `handle.getFile()`), kept in storage or held in memory. Only for types the browser shows without running anything from the file (`VIEWABLE`): an opened `blob:` URL has this page's origin, so HTML or SVG could run scripts on it. Streamed downloads can't be opened; the page doesn't learn where they were saved.
 - `setPicking()` / `setPeerPicking()` implement the "Choosing files…" and "Choosing where to save…" status:
   - **Start:** the file input's `click`, the desktop save dialog, or the start of a download. On Android, Chrome may ask for a save location there, depending on its settings.
   - **End:** `change` or `cancel`, or focus returning after the picker took it away.
